@@ -3,7 +3,7 @@ import json
 import os
 import matplotlib.pyplot as plt
 from environment import OpenPitMineEnv
-from hybrid_astar import HybridAStarPlanner
+
 from path_utils import improved_visualize_environment
 
 class MineEnvironmentLoader:
