@@ -658,37 +658,34 @@ class OpenPitMineEnv:
             return False
     
     def _get_obstacle_list(self):
-        """将网格障碍物转换为矩形列表
-        
-        Returns:
-            list: 障碍物矩形列表
-        """
+        """Convert grid obstacles to rectangle list"""
         obstacles = []
         
-        # 简单实现：用连通区域分析
+        # Create a copy of the grid to avoid modifying the original
         visited = np.zeros_like(self.grid, dtype=bool)
         
+        # Scan the entire grid
         for x in range(self.width):
             for y in range(self.height):
                 if self.grid[x, y] == 1 and not visited[x, y]:
-                    # 找到一个新障碍物，用BFS寻找连通区域
+                    # Found a new obstacle, find its extent
                     min_x, min_y = x, y
                     max_x, max_y = x, y
                     
-                    # BFS
+                    # Use BFS to find connected obstacle cells
                     queue = [(x, y)]
                     visited[x, y] = True
                     
                     while queue:
                         cx, cy = queue.pop(0)
                         
-                        # 更新边界
+                        # Update boundaries
                         min_x = min(min_x, cx)
                         min_y = min(min_y, cy)
                         max_x = max(max_x, cx)
                         max_y = max(max_y, cy)
                         
-                        # 检查四邻域
+                        # Check neighbors
                         for dx, dy in [(1, 0), (-1, 0), (0, 1), (0, -1)]:
                             nx, ny = cx + dx, cy + dy
                             if (0 <= nx < self.width and 0 <= ny < self.height and
@@ -696,7 +693,7 @@ class OpenPitMineEnv:
                                 visited[nx, ny] = True
                                 queue.append((nx, ny))
                     
-                    # 添加矩形障碍物
+                    # Add rectangle obstacle
                     obstacles.append({
                         "x": min_x,
                         "y": min_y,

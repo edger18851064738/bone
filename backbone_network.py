@@ -63,17 +63,10 @@ class BackbonePathNetwork:
         return self.paths
         
     def _identify_key_points(self):
-        """识别所有关键点
-        
-        从环境中提取装载点、卸载点、停车区等关键点，
-        并为每个点分配唯一ID。
-        
-        Returns:
-            list: 关键点列表，每个元素包含位置、类型和ID
-        """
+        """Identify all key points"""
         key_points = []
         
-        # 添加装载点
+        # Add loading points
         for i, point in enumerate(self.env.loading_points):
             pos = self._ensure_3d_point(point)
             key_points.append({
@@ -82,7 +75,7 @@ class BackbonePathNetwork:
                 "id": f"L{i}"
             })
         
-        # 添加卸载点
+        # Add unloading points
         for i, point in enumerate(self.env.unloading_points):
             pos = self._ensure_3d_point(point)
             key_points.append({
@@ -91,14 +84,20 @@ class BackbonePathNetwork:
                 "id": f"U{i}"
             })
         
-        # 添加停车区
-        for i, point in enumerate(getattr(self.env, 'parking_areas', [])):
+        # Add parking areas - ensure we're accessing them correctly
+        parking_areas = getattr(self.env, 'parking_areas', [])
+        for i, point in enumerate(parking_areas):
             pos = self._ensure_3d_point(point)
             key_points.append({
                 "position": pos, 
                 "type": "parking",
                 "id": f"P{i}"
             })
+        
+        # Print debug info to verify points are found
+        print(f"Identified {len(key_points)} key points:")
+        for kp in key_points:
+            print(f"  {kp['id']} ({kp['type']}): {kp['position']}")
         
         return key_points
     

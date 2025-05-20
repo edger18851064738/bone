@@ -2112,7 +2112,12 @@ class MineGUI(QMainWindow):
             
             # 启用相关按钮
             self.enable_controls(True)
-            
+            print(f"Environment loaded: {self.env is not None}")
+            if self.env:
+                print(f"Obstacles: {len(self.env._get_obstacle_list())}")
+                print(f"Loading points: {len(self.env.loading_points)}")
+                print(f"Unloading points: {len(self.env.unloading_points)}")
+                print(f"Parking areas: {len(self.env.parking_areas)}")            
         except Exception as e:
             self.log(f"加载环境失败: {str(e)}", "error")
     

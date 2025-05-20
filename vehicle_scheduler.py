@@ -523,7 +523,39 @@ class ECBSVehicleScheduler(VehicleScheduler):
             self._plan_coordinated_paths(vehicle_ids)
         
         return assignments
-    
+    def assign_task(self, vehicle_id, task_id):
+        """
+        Assign a single task to a vehicle
+        
+        Args:
+            vehicle_id: ID of the vehicle to assign the task to
+            task_id: ID of the task to assign
+            
+        Returns:
+            bool: True if successfully assigned, False otherwise
+        """
+        if vehicle_id not in self.vehicle_statuses:
+            return False
+            
+        if task_id not in self.tasks:
+            return False
+        
+        # Mark the task as assigned
+        task = self.tasks[task_id]
+        task.status = 'assigned'
+        task.assigned_vehicle = vehicle_id
+        
+        # Add task to vehicle's queue
+        if vehicle_id not in self.task_queues:
+            self.task_queues[vehicle_id] = []
+        
+        self.task_queues[vehicle_id].append(task_id)
+        
+        # If vehicle is idle, start the task immediately
+        if self.vehicle_statuses[vehicle_id]['status'] == 'idle':
+            self._start_next_task(vehicle_id)
+        
+        return True    
     def _find_best_vehicle_for_task(self, task):
         """
         为任务找到最佳车辆，考虑多种因素
