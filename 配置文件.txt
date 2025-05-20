@@ -1,0 +1,70 @@
+环境配置文件{
+  "width": 500,
+  "height": 500,
+  "resolution": 1.0,
+  "obstacles": [
+    {"x": 100, "y": 100, "width": 50, "height": 50},
+    {"x": 300, "y": 200, "width": 80, "height": 30}
+  ],
+  "loading_points": [
+    {"id": "L1", "x": 50, "y": 50, "capacity": 2},
+    {"id": "L2", "x": 450, "y": 450, "capacity": 2}
+  ],
+  "unloading_points": [
+    {"id": "U1", "x": 450, "y": 50, "capacity": 3},
+    {"id": "U2", "x": 50, "y": 450, "capacity": 3}
+  ],
+  "vehicles": [
+    {"id": 1, "x": 250, "y": 250, "theta": 0, "max_load": 100, "type": "dump_truck"},
+    {"id": 2, "x": 270, "y": 250, "theta": 0, "max_load": 100, "type": "dump_truck"},
+    {"id": 3, "x": 290, "y": 250, "theta": 0, "max_load": 100, "type": "dump_truck"}
+  ],
+  "parameters": {
+    "vehicle_length": 6.0,
+    "vehicle_width": 3.0,
+    "turning_radius": 8.0,
+    "min_vehicle_distance": 10.0
+  }
+}
+
+任务模版配置文件{
+  "templates": [
+    {
+      "id": "mining_cycle",
+      "name": "标准采矿循环",
+      "tasks": [
+        {
+          "task_type": "to_loading",
+          "priority": 1,
+          "duration": 50
+        },
+        {
+          "task_type": "to_unloading",
+          "priority": 2,
+          "duration": 30
+        },
+        {
+          "task_type": "to_initial",
+          "priority": 1,
+          "duration": 0
+        }
+      ]
+    },
+    {
+      "id": "maintenance_cycle",
+      "name": "维护循环",
+      "tasks": [
+        {
+          "task_type": "to_maintenance",
+          "priority": 3,
+          "duration": 300
+        },
+        {
+          "task_type": "to_initial",
+          "priority": 1,
+          "duration": 0
+        }
+      ]
+    }
+  ]
+}
