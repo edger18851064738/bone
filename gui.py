@@ -1,18 +1,53 @@
+import sys
+import os
+import math
+import time
+import json
+import numpy as np
+from collections import defaultdict
+from PyQt5.QtCore import (Qt, QTimer, pyqtSignal, QObject, QThread, QRectF, 
+                         QPointF, QLineF, QSizeF, QPropertyAnimation, QVariantAnimation, QSize)
+from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
+                            QPushButton, QLabel, QComboBox, QCheckBox, QFileDialog, QSlider,
+                            QGroupBox, QTabWidget, QSpinBox, QDoubleSpinBox, QProgressBar,
+                            QMessageBox, QTextEdit, QSplitter, QAction, QStatusBar, QToolBar,
+                            QMenu, QDockWidget, QGraphicsScene, QGraphicsView, QGraphicsItem,
+                            QGraphicsEllipseItem, QGraphicsRectItem, QGraphicsPolygonItem, 
+                            QGraphicsPathItem, QGraphicsLineItem, QGraphicsTextItem, QGraphicsItemGroup,
+                            QGridLayout, QFrame, QStyleFactory, QScrollArea, QTableWidget, QTableWidgetItem,
+                            QListWidget, QListWidgetItem)
+from PyQt5.QtGui import (QIcon, QFont, QPixmap, QPen, QBrush, QColor, QPainter, QPainterPath,
+                        QTransform, QPolygonF, QLinearGradient, QRadialGradient, QPalette)
+
+# Import other project components
+from backbone_network import BackbonePathNetwork
+from path_planner import PathPlanner
+from traffic_manager import TrafficManager, Conflict
+from vehicle_scheduler import VehicleScheduler, VehicleTask, ECBSVehicleScheduler
+from environment import OpenPitMineEnv
+from path_utils import improved_visualize_environment
+
 class BackbonePathVisualizer(QGraphicsItemGroup):
-    """主干路径可视化组件"""
+    """Backbone path network visualization component"""
     
     def __init__(self, backbone_network, parent=None):
+        """Initialize the backbone network visualizer
+        
+        Args:
+            backbone_network: The backbone network object
+            parent: Parent QGraphicsItem
+        """
         super().__init__(parent)
         self.backbone_network = backbone_network
         self.path_items = {}
         self.connection_items = {}
         self.node_items = {}
-        self.setZValue(1)  # 确保显示在合适的层
+        self.setZValue(1)  # Ensure display in appropriate layer
         self.update_visualization()
     
     def update_visualization(self):
-        """更新可视化"""
-        # 清除现有项
+        """Update the visualization of the backbone network"""
+        # Clear existing items
         for item in self.path_items.values():
             self.removeFromGroup(item)
         
@@ -29,14 +64,14 @@ class BackbonePathVisualizer(QGraphicsItemGroup):
         if not self.backbone_network:
             return
         
-        # 绘制主干路径
+        # Draw backbone paths
         for path_id, path_data in self.backbone_network.paths.items():
             path = path_data['path']
             
             if not path or len(path) < 2:
                 continue
             
-            # 创建路径项
+            # Create path item
             painter_path = QPainterPath()
             painter_path.moveTo(path[0][0], path[0][1])
             
@@ -45,32 +80,32 @@ class BackbonePathVisualizer(QGraphicsItemGroup):
             
             path_item = QGraphicsPathItem(painter_path)
             
-            # 设置样式，使用渐变色
+            # Set style with gradient color
             gradient = QLinearGradient(path[0][0], path[0][1], path[-1][0], path[-1][1])
-            gradient.setColorAt(0, QColor(40, 120, 180, 180))  # 起点颜色
-            gradient.setColorAt(1, QColor(120, 40, 180, 180))  # 终点颜色
+            gradient.setColorAt(0, QColor(40, 120, 180, 180))  # Start color
+            gradient.setColorAt(1, QColor(120, 40, 180, 180))  # End color
             
-            pen = QPen(gradient, 2.0)  # 加粗的路径线
+            pen = QPen(gradient, 2.0)  # Bold path line
             path_item.setPen(pen)
             
-            # 添加到组
+            # Add to group
             self.addToGroup(path_item)
             self.path_items[path_id] = path_item
         
-        # 绘制连接点
+        # Draw connection points
         for conn_id, conn_data in self.backbone_network.connections.items():
             position = conn_data['position']
             conn_type = conn_data.get('type', 'midpath')
             
-            # 根据类型选择不同样式
+            # Different styles based on type
             if conn_type == 'endpoint':
-                # 端点连接点，较大
+                # Endpoint connections, larger
                 radius = 2.5
-                color = QColor(220, 120, 40)  # 橙色
+                color = QColor(220, 120, 40)  # Orange
             else:
-                # 中间连接点，较小
+                # Mid-path connections, smaller
                 radius = 1.5
-                color = QColor(120, 220, 40)  # 绿色
+                color = QColor(120, 220, 40)  # Green
             
             conn_item = QGraphicsEllipseItem(
                 position[0] - radius, position[1] - radius,
@@ -80,12 +115,12 @@ class BackbonePathVisualizer(QGraphicsItemGroup):
             conn_item.setBrush(QBrush(color))
             conn_item.setPen(QPen(Qt.black, 0.5))
             
-            # 添加到组
+            # Add to group
             self.addToGroup(conn_item)
             self.connection_items[conn_id] = conn_item
         
-        # 绘制节点（如装载点、卸载点等）
-        # 遍历所有路径的起点和终点
+        # Draw nodes (loading points, unloading points, etc.)
+        # Get all paths' start and end points
         nodes = {}
         
         for path_id, path_data in self.backbone_network.paths.items():
@@ -106,19 +141,19 @@ class BackbonePathVisualizer(QGraphicsItemGroup):
             position = node_data['position']
             node_type = node_data['type']
             
-            # 根据类型选择不同样式
+            # Different styles based on type
             if node_type == 'loading_point':
-                # 装载点，较大
+                # Loading point, larger
                 radius = 4.0
-                color = QColor(0, 180, 0)  # 绿色
+                color = QColor(0, 180, 0)  # Green
             elif node_type == 'unloading_point':
-                # 卸载点，较大
+                # Unloading point, larger
                 radius = 4.0
-                color = QColor(180, 0, 0)  # 红色
+                color = QColor(180, 0, 0)  # Red
             else:
-                # 其他点，中等大小
+                # Other point, medium size
                 radius = 3.0
-                color = QColor(100, 100, 100)  # 灰色
+                color = QColor(100, 100, 100)  # Gray
             
             node_item = QGraphicsEllipseItem(
                 position[0] - radius, position[1] - radius,
@@ -128,42 +163,42 @@ class BackbonePathVisualizer(QGraphicsItemGroup):
             node_item.setBrush(QBrush(color))
             node_item.setPen(QPen(Qt.black, 0.8))
             
-            # 添加标签
+            # Add label
             label_item = QGraphicsTextItem(node_id)
             label_item.setPos(position[0] + radius + 1, position[1] - radius - 2)
             label_item.setFont(QFont("Arial", 3))
             
-            # 添加到组
+            # Add to group
             self.addToGroup(node_item)
             self.addToGroup(label_item)
             self.node_items[node_id] = node_item
     
     def update_traffic_flow(self):
-        """更新交通流量可视化"""
+        """Update traffic flow visualization - shows ECBS path usage"""
         if not self.backbone_network:
             return
         
-        # 根据流量更新路径样式
+        # Update paths based on traffic flow
         for path_id, path_item in self.path_items.items():
             if path_id in self.backbone_network.paths:
                 path_data = self.backbone_network.paths[path_id]
                 traffic_flow = path_data.get('traffic_flow', 0)
                 capacity = path_data.get('capacity', 1)
                 
-                # 计算流量比例
+                # Calculate flow ratio
                 ratio = min(1.0, traffic_flow / max(1, capacity))
                 
-                # 根据流量比例调整线宽和颜色
-                width = 1.0 + ratio * 3.0  # 1-4之间的线宽
+                # Adjust line width and color based on traffic flow
+                width = 1.0 + ratio * 3.0  # 1-4 range
                 
-                # 颜色从绿色到黄色再到红色
+                # Color from green to yellow to red
                 if ratio < 0.5:
-                    # 绿色到黄色
+                    # Green to yellow
                     r = int(255 * ratio * 2)
                     g = 255
                     b = 0
                 else:
-                    # 黄色到红色
+                    # Yellow to red
                     r = 255
                     g = int(255 * (2 - ratio * 2))
                     b = 0
@@ -174,137 +209,138 @@ class BackbonePathVisualizer(QGraphicsItemGroup):
 
 
 class MineGUI(QMainWindow):
-    """露天矿多车调度系统GUI"""
+    """Open Pit Mine Multi-Vehicle Coordination System GUI"""
     
     def __init__(self):
+        """Initialize the main GUI window"""
         super().__init__()
         
-        # 系统组件
+        # System components
         self.env = None
         self.backbone_network = None
         self.path_planner = None
         self.vehicle_scheduler = None
         self.traffic_manager = None
         
-        # 初始化UI
+        # Initialize UI
         self.init_ui()
         
-        # 创建定时器用于更新
+        # Create update timer
         self.update_timer = QTimer(self)
         self.update_timer.timeout.connect(self.update_display)
         self.update_timer.start(50)  # 20 FPS
     
     def init_ui(self):
-        """初始化用户界面"""
-        # 设置主窗口
-        self.setWindowTitle("露天矿多车调度系统 (基于主干路径)")
+        """Initialize the user interface"""
+        # Set main window
+        self.setWindowTitle("Open Pit Mine Multi-Vehicle Coordination System (Backbone Network-based)")
         self.setGeometry(100, 100, 1200, 800)
         
-        # 创建中心部件
+        # Create central widget
         self.central_widget = QWidget()
         self.setCentralWidget(self.central_widget)
         
-        # 主布局
+        # Main layout
         self.main_layout = QHBoxLayout(self.central_widget)
         
-        # 创建左侧控制面板
+        # Create left control panel
         self.create_control_panel()
         
-        # 创建右侧显示区域
+        # Create right display area
         self.create_display_area()
         
-        # 创建菜单栏
+        # Create menu bar
         self.create_menu_bar()
         
-        # 创建状态栏
-        self.statusBar().showMessage("系统就绪")
+        # Create status bar
+        self.statusBar().showMessage("System Ready")
         
-        # 创建工具栏
+        # Create toolbar
         self.create_tool_bar()
     
     def create_control_panel(self):
-        """创建左侧控制面板"""
-        # 控制面板主容器
+        """Create left control panel"""
+        # Control panel main container
         self.control_panel = QFrame()
         self.control_panel.setFrameShape(QFrame.StyledPanel)
         self.control_panel.setMinimumWidth(280)
         self.control_panel.setMaximumWidth(350)
         
-        # 控制面板布局
+        # Control panel layout
         control_layout = QVBoxLayout(self.control_panel)
         
-        # 创建选项卡控件
+        # Create tab widget
         self.tab_widget = QTabWidget()
         control_layout.addWidget(self.tab_widget)
         
-        # 环境选项卡
+        # Environment tab
         self.env_tab = QWidget()
         self.env_layout = QVBoxLayout(self.env_tab)
-        self.tab_widget.addTab(self.env_tab, "环境")
+        self.tab_widget.addTab(self.env_tab, "Environment")
         
-        # 环境选项卡内容
+        # Environment tab content
         self.create_env_tab()
         
-        # 路径选项卡
+        # Path tab
         self.path_tab = QWidget()
         self.path_layout = QVBoxLayout(self.path_tab)
-        self.tab_widget.addTab(self.path_tab, "路径")
+        self.tab_widget.addTab(self.path_tab, "Paths")
         
-        # 路径选项卡内容
+        # Path tab content
         self.create_path_tab()
         
-        # 车辆选项卡
+        # Vehicle tab
         self.vehicle_tab = QWidget()
         self.vehicle_layout = QVBoxLayout(self.vehicle_tab)
-        self.tab_widget.addTab(self.vehicle_tab, "车辆")
+        self.tab_widget.addTab(self.vehicle_tab, "Vehicles")
         
-        # 车辆选项卡内容
+        # Vehicle tab content
         self.create_vehicle_tab()
         
-        # 任务选项卡
+        # Task tab
         self.task_tab = QWidget()
         self.task_layout = QVBoxLayout(self.task_tab)
-        self.tab_widget.addTab(self.task_tab, "任务")
+        self.tab_widget.addTab(self.task_tab, "Tasks")
         
-        # 任务选项卡内容
+        # Task tab content
         self.create_task_tab()
         
-        # 日志区域
+        # Log area
         self.create_log_area(control_layout)
         
-        # 添加到主布局
+        # Add to main layout
         self.main_layout.addWidget(self.control_panel, 1)
     
     def create_env_tab(self):
-        """创建环境选项卡内容"""
-        # 文件加载组
-        file_group = QGroupBox("环境加载")
+        """Create environment tab content"""
+        # File loading group
+        file_group = QGroupBox("Environment Loading")
         file_layout = QGridLayout()
         
-        # 地图文件
-        file_layout.addWidget(QLabel("地图文件:"), 0, 0)
-        self.map_path = QLabel("未选择")
+        # Map file
+        file_layout.addWidget(QLabel("Map File:"), 0, 0)
+        self.map_path = QLabel("Not selected")
         self.map_path.setStyleSheet("background-color: #f8f9fa; padding: 5px; border-radius: 3px;")
         file_layout.addWidget(self.map_path, 0, 1)
         
-        # 浏览按钮
-        self.browse_button = QPushButton("浏览...")
+        # Browse button
+        self.browse_button = QPushButton("Browse...")
         self.browse_button.clicked.connect(self.open_map_file)
         file_layout.addWidget(self.browse_button, 0, 2)
         
-        # 加载按钮
-        self.load_button = QPushButton("加载环境")
+        # Load button
+        self.load_button = QPushButton("Load Environment")
         self.load_button.clicked.connect(self.load_environment)
         file_layout.addWidget(self.load_button, 1, 0, 1, 3)
         
         file_group.setLayout(file_layout)
         self.env_layout.addWidget(file_group)
         
-        # 环境信息组
-        info_group = QGroupBox("环境信息")
+        # Environment info group
+        info_group = QGroupBox("Environment Information")
         info_layout = QGridLayout()
         
-        labels = ["宽度:", "高度:", "装载点:", "卸载点:", "车辆数:"]
+        labels = ["Width:", "Height:", "Loading Points:", "Unloading Points:", "Vehicles:"]
         self.env_info_values = {}
         
         for i, label in enumerate(labels):
@@ -316,13 +352,13 @@ class MineGUI(QMainWindow):
         info_group.setLayout(info_layout)
         self.env_layout.addWidget(info_group)
         
-        # 环境控制组
-        control_group = QGroupBox("环境控制")
+        # Environment control group
+        control_group = QGroupBox("Environment Control")
         control_layout = QVBoxLayout()
         
-        # 模拟速度
+        # Simulation speed
         speed_layout = QHBoxLayout()
-        speed_layout.addWidget(QLabel("模拟速度:"))
+        speed_layout.addWidget(QLabel("Simulation Speed:"))
         
         self.speed_slider = QSlider(Qt.Horizontal)
         self.speed_slider.setMinimum(1)
@@ -339,25 +375,25 @@ class MineGUI(QMainWindow):
         
         control_layout.addLayout(speed_layout)
         
-        # 控制按钮
+        # Control buttons
         button_layout = QHBoxLayout()
         
-        self.start_button = QPushButton("开始")
+        self.start_button = QPushButton("Start")
         self.start_button.clicked.connect(self.start_simulation)
         button_layout.addWidget(self.start_button)
         
-        self.pause_button = QPushButton("暂停")
+        self.pause_button = QPushButton("Pause")
         self.pause_button.clicked.connect(self.pause_simulation)
         self.pause_button.setEnabled(False)
         button_layout.addWidget(self.pause_button)
         
-        self.reset_button = QPushButton("重置")
+        self.reset_button = QPushButton("Reset")
         self.reset_button.clicked.connect(self.reset_simulation)
         button_layout.addWidget(self.reset_button)
         
         control_layout.addLayout(button_layout)
         
-        # 进度条
+        # Progress bar
         self.progress_bar = QProgressBar()
         self.progress_bar.setValue(0)
         control_layout.addWidget(self.progress_bar)
@@ -365,25 +401,25 @@ class MineGUI(QMainWindow):
         control_group.setLayout(control_layout)
         self.env_layout.addWidget(control_group)
         
-        # 添加空白区域
+        # Add spacing
         self.env_layout.addStretch()
     
     def create_path_tab(self):
-        """创建路径选项卡内容"""
-        # 路径生成组
-        generate_group = QGroupBox("生成主干路径")
+        """Create path tab content with ECBS configuration"""
+        # Path generation group
+        generate_group = QGroupBox("Generate Backbone Path")
         generate_layout = QVBoxLayout()
         
-        # 参数设置
+        # Parameter settings
         param_layout = QGridLayout()
         
-        param_layout.addWidget(QLabel("连接点间距:"), 0, 0)
+        param_layout.addWidget(QLabel("Connection Spacing:"), 0, 0)
         self.conn_spacing = QSpinBox()
         self.conn_spacing.setRange(5, 50)
         self.conn_spacing.setValue(10)
         param_layout.addWidget(self.conn_spacing, 0, 1)
         
-        param_layout.addWidget(QLabel("路径平滑度:"), 1, 0)
+        param_layout.addWidget(QLabel("Path Smoothness:"), 1, 0)
         self.path_smoothness = QSpinBox()
         self.path_smoothness.setRange(1, 10)
         self.path_smoothness.setValue(5)
@@ -391,19 +427,19 @@ class MineGUI(QMainWindow):
         
         generate_layout.addLayout(param_layout)
         
-        # 生成按钮
-        self.generate_paths_button = QPushButton("生成主干路径网络")
+        # Generate button
+        self.generate_paths_button = QPushButton("Generate Backbone Path Network")
         self.generate_paths_button.clicked.connect(self.generate_backbone_network)
         generate_layout.addWidget(self.generate_paths_button)
         
         generate_group.setLayout(generate_layout)
         self.path_layout.addWidget(generate_group)
         
-        # 路径信息组
-        info_group = QGroupBox("路径网络信息")
+        # Path info group
+        info_group = QGroupBox("Path Network Information")
         info_layout = QGridLayout()
         
-        labels = ["路径总数:", "连接点总数:", "总长度:", "平均长度:"]
+        labels = ["Total Paths:", "Connection Points:", "Total Length:", "Average Length:"]
         self.path_info_values = {}
         
         for i, label in enumerate(labels):
@@ -415,21 +451,21 @@ class MineGUI(QMainWindow):
         info_group.setLayout(info_layout)
         self.path_layout.addWidget(info_group)
         
-        # 路径显示选项
-        display_group = QGroupBox("显示选项")
+        # Path display options
+        display_group = QGroupBox("Display Options")
         display_layout = QVBoxLayout()
         
-        self.show_paths_cb = QCheckBox("显示主干路径")
+        self.show_paths_cb = QCheckBox("Show Backbone Paths")
         self.show_paths_cb.setChecked(True)
         self.show_paths_cb.stateChanged.connect(self.update_path_display)
         display_layout.addWidget(self.show_paths_cb)
         
-        self.show_connections_cb = QCheckBox("显示连接点")
+        self.show_connections_cb = QCheckBox("Show Connection Points")
         self.show_connections_cb.setChecked(True)
         self.show_connections_cb.stateChanged.connect(self.update_path_display)
         display_layout.addWidget(self.show_connections_cb)
         
-        self.show_traffic_cb = QCheckBox("显示交通流量")
+        self.show_traffic_cb = QCheckBox("Show Traffic Flow")
         self.show_traffic_cb.setChecked(True)
         self.show_traffic_cb.stateChanged.connect(self.update_path_display)
         display_layout.addWidget(self.show_traffic_cb)
@@ -437,23 +473,55 @@ class MineGUI(QMainWindow):
         display_group.setLayout(display_layout)
         self.path_layout.addWidget(display_group)
         
-        # 编辑工具
-        tools_group = QGroupBox("编辑工具")
+        # ECBS configuration group
+        ecbs_group = QGroupBox("ECBS Configuration")
+        ecbs_layout = QGridLayout()
+        
+        # Suboptimality bound
+        ecbs_layout.addWidget(QLabel("Suboptimality Bound:"), 0, 0)
+        self.subopt_slider = QSlider(Qt.Horizontal)
+        self.subopt_slider.setMinimum(10)
+        self.subopt_slider.setMaximum(30)
+        self.subopt_slider.setValue(15)  # Default 1.5
+        self.subopt_slider.valueChanged.connect(self.update_ecbs_params)
+        ecbs_layout.addWidget(self.subopt_slider, 0, 1)
+        
+        self.subopt_value = QLabel("1.5")
+        self.subopt_value.setAlignment(Qt.AlignCenter)
+        ecbs_layout.addWidget(self.subopt_value, 0, 2)
+        
+        # Conflict resolution strategy
+        ecbs_layout.addWidget(QLabel("Resolution Strategy:"), 1, 0)
+        self.strategy_combo = QComboBox()
+        self.strategy_combo.addItems(["ECBS", "Priority", "Time Window"])
+        self.strategy_combo.currentIndexChanged.connect(self.update_ecbs_params)
+        ecbs_layout.addWidget(self.strategy_combo, 1, 1, 1, 2)
+        
+        # Apply button
+        self.apply_ecbs_button = QPushButton("Apply ECBS Settings")
+        self.apply_ecbs_button.clicked.connect(self.apply_ecbs_settings)
+        ecbs_layout.addWidget(self.apply_ecbs_button, 2, 0, 1, 3)
+        
+        ecbs_group.setLayout(ecbs_layout)
+        self.path_layout.addWidget(ecbs_group)
+        
+        # Edit tools
+        tools_group = QGroupBox("Edit Tools")
         tools_layout = QVBoxLayout()
         
-        self.edit_mode_cb = QCheckBox("编辑模式")
+        self.edit_mode_cb = QCheckBox("Edit Mode")
         self.edit_mode_cb.setChecked(False)
         self.edit_mode_cb.stateChanged.connect(self.toggle_edit_mode)
         tools_layout.addWidget(self.edit_mode_cb)
         
         tool_button_layout = QHBoxLayout()
         
-        self.add_path_button = QPushButton("添加路径")
+        self.add_path_button = QPushButton("Add Path")
         self.add_path_button.setEnabled(False)
         self.add_path_button.clicked.connect(self.start_add_path)
         tool_button_layout.addWidget(self.add_path_button)
         
-        self.delete_path_button = QPushButton("删除路径")
+        self.delete_path_button = QPushButton("Delete Path")
         self.delete_path_button.setEnabled(False)
         self.delete_path_button.clicked.connect(self.start_delete_path)
         tool_button_layout.addWidget(self.delete_path_button)
@@ -463,13 +531,13 @@ class MineGUI(QMainWindow):
         tools_group.setLayout(tools_layout)
         self.path_layout.addWidget(tools_group)
         
-        # 添加空白区域
+        # Add spacing
         self.path_layout.addStretch()
     
     def create_vehicle_tab(self):
-        """创建车辆选项卡内容"""
-        # 车辆选择组
-        select_group = QGroupBox("选择车辆")
+        """Create vehicle tab content"""
+        # Vehicle selection group
+        select_group = QGroupBox("Select Vehicle")
         select_layout = QVBoxLayout()
         
         self.vehicle_combo = QComboBox()
@@ -479,11 +547,11 @@ class MineGUI(QMainWindow):
         select_group.setLayout(select_layout)
         self.vehicle_layout.addWidget(select_group)
         
-        # 车辆信息组
-        info_group = QGroupBox("车辆信息")
+        # Vehicle info group
+        info_group = QGroupBox("Vehicle Information")
         info_layout = QGridLayout()
         
-        labels = ["ID:", "位置:", "状态:", "载重:", "当前任务:", "完成任务:"]
+        labels = ["ID:", "Position:", "Status:", "Load:", "Current Task:", "Completed Tasks:"]
         self.vehicle_info_values = {}
         
         for i, label in enumerate(labels):
@@ -495,59 +563,59 @@ class MineGUI(QMainWindow):
         info_group.setLayout(info_layout)
         self.vehicle_layout.addWidget(info_group)
         
-        # 车辆控制组
-        control_group = QGroupBox("车辆控制")
+        # Vehicle control group
+        control_group = QGroupBox("Vehicle Control")
         control_layout = QVBoxLayout()
         
-        # 任务控制
+        # Task control
         task_layout = QHBoxLayout()
         
-        self.assign_task_button = QPushButton("分配任务")
+        self.assign_task_button = QPushButton("Assign Task")
         self.assign_task_button.clicked.connect(self.assign_vehicle_task)
         task_layout.addWidget(self.assign_task_button)
         
-        self.cancel_task_button = QPushButton("取消任务")
+        self.cancel_task_button = QPushButton("Cancel Task")
         self.cancel_task_button.clicked.connect(self.cancel_vehicle_task)
         task_layout.addWidget(self.cancel_task_button)
         
         control_layout.addLayout(task_layout)
         
-        # 位置控制
+        # Position control
         position_layout = QHBoxLayout()
         
-        self.goto_loading_button = QPushButton("前往装载点")
+        self.goto_loading_button = QPushButton("Go to Loading Point")
         self.goto_loading_button.clicked.connect(self.goto_loading_point)
         position_layout.addWidget(self.goto_loading_button)
         
-        self.goto_unloading_button = QPushButton("前往卸载点")
+        self.goto_unloading_button = QPushButton("Go to Unloading Point")
         self.goto_unloading_button.clicked.connect(self.goto_unloading_point)
         position_layout.addWidget(self.goto_unloading_button)
         
         control_layout.addLayout(position_layout)
         
-        # 添加返回起点按钮
-        self.return_button = QPushButton("返回起点")
+        # Add return button
+        self.return_button = QPushButton("Return to Start")
         self.return_button.clicked.connect(self.return_to_start)
         control_layout.addWidget(self.return_button)
         
         control_group.setLayout(control_layout)
         self.vehicle_layout.addWidget(control_group)
         
-        # 车辆显示选项
-        display_group = QGroupBox("显示选项")
+        # Vehicle display options
+        display_group = QGroupBox("Display Options")
         display_layout = QVBoxLayout()
         
-        self.show_vehicles_cb = QCheckBox("显示所有车辆")
+        self.show_vehicles_cb = QCheckBox("Show All Vehicles")
         self.show_vehicles_cb.setChecked(True)
         self.show_vehicles_cb.stateChanged.connect(self.update_vehicle_display)
         display_layout.addWidget(self.show_vehicles_cb)
         
-        self.show_vehicle_paths_cb = QCheckBox("显示车辆路径")
+        self.show_vehicle_paths_cb = QCheckBox("Show Vehicle Paths")
         self.show_vehicle_paths_cb.setChecked(True)
         self.show_vehicle_paths_cb.stateChanged.connect(self.update_vehicle_display)
         display_layout.addWidget(self.show_vehicle_paths_cb)
         
-        self.show_vehicle_labels_cb = QCheckBox("显示车辆标签")
+        self.show_vehicle_labels_cb = QCheckBox("Show Vehicle Labels")
         self.show_vehicle_labels_cb.setChecked(True)
         self.show_vehicle_labels_cb.stateChanged.connect(self.update_vehicle_display)
         display_layout.addWidget(self.show_vehicle_labels_cb)
@@ -555,13 +623,13 @@ class MineGUI(QMainWindow):
         display_group.setLayout(display_layout)
         self.vehicle_layout.addWidget(display_group)
         
-        # 添加空白区域
+        # Add spacing
         self.vehicle_layout.addStretch()
     
     def create_task_tab(self):
-        """创建任务选项卡内容"""
-        # 任务列表组
-        list_group = QGroupBox("任务列表")
+        """Create task tab content with ECBS status display"""
+        # Task list group
+        list_group = QGroupBox("Task List")
         list_layout = QVBoxLayout()
         
         self.task_list = QListWidget()
@@ -571,11 +639,11 @@ class MineGUI(QMainWindow):
         list_group.setLayout(list_layout)
         self.task_layout.addWidget(list_group)
         
-        # 任务信息组
-        info_group = QGroupBox("任务信息")
+        # Task info group
+        info_group = QGroupBox("Task Information")
         info_layout = QGridLayout()
         
-        labels = ["ID:", "类型:", "状态:", "车辆:", "进度:", "开始时间:", "完成时间:"]
+        labels = ["ID:", "Type:", "Status:", "Vehicle:", "Progress:", "Start Time:", "Completion Time:"]
         self.task_info_values = {}
         
         for i, label in enumerate(labels):
@@ -587,28 +655,51 @@ class MineGUI(QMainWindow):
         info_group.setLayout(info_layout)
         self.task_layout.addWidget(info_group)
         
-        # 任务操作组
-        action_group = QGroupBox("任务操作")
+        # Task action group
+        action_group = QGroupBox("Task Actions")
         action_layout = QVBoxLayout()
         
-        # 模板创建按钮
-        self.create_template_button = QPushButton("创建任务模板")
+        # Template creation button
+        self.create_template_button = QPushButton("Create Task Template")
         self.create_template_button.clicked.connect(self.create_task_template)
         action_layout.addWidget(self.create_template_button)
         
-        # 自动分配按钮
-        self.auto_assign_button = QPushButton("自动分配任务")
+        # Auto-assign button
+        self.auto_assign_button = QPushButton("Auto-Assign Tasks")
         self.auto_assign_button.clicked.connect(self.auto_assign_tasks)
         action_layout.addWidget(self.auto_assign_button)
         
         action_group.setLayout(action_layout)
         self.task_layout.addWidget(action_group)
         
-        # 统计信息组
-        stats_group = QGroupBox("统计信息")
+        # ECBS conflict information section
+        ecbs_group = QGroupBox("ECBS Conflict Status")
+        ecbs_layout = QVBoxLayout()
+        
+        self.conflict_info_label = QLabel("Resolved conflicts: 0")
+        self.conflict_info_label.setStyleSheet("font-weight: bold;")
+        ecbs_layout.addWidget(self.conflict_info_label)
+        
+        # Add conflict history table
+        self.conflict_table = QTableWidget(0, 3)
+        self.conflict_table.setHorizontalHeaderLabels(["Vehicle 1", "Vehicle 2", "Type"])
+        self.conflict_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.conflict_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        ecbs_layout.addWidget(self.conflict_table)
+        
+        # Add refresh button for conflict display
+        refresh_button = QPushButton("Refresh Conflict Data")
+        refresh_button.clicked.connect(self.refresh_conflict_data)
+        ecbs_layout.addWidget(refresh_button)
+        
+        ecbs_group.setLayout(ecbs_layout)
+        self.task_layout.addWidget(ecbs_group)
+        
+        # Stats group
+        stats_group = QGroupBox("Statistics")
         stats_layout = QGridLayout()
         
-        labels = ["总任务数:", "完成任务:", "失败任务:", "平均利用率:", "总运行时间:"]
+        labels = ["Total Tasks:", "Completed Tasks:", "Failed Tasks:", "Average Utilization:", "Total Runtime:"]
         self.task_stats_values = {}
         
         for i, label in enumerate(labels):
@@ -620,12 +711,12 @@ class MineGUI(QMainWindow):
         stats_group.setLayout(stats_layout)
         self.task_layout.addWidget(stats_group)
         
-        # 添加空白区域
+        # Add spacing
         self.task_layout.addStretch()
     
     def create_log_area(self, parent_layout):
-        """创建日志区域"""
-        log_group = QGroupBox("系统日志")
+        """Create log area"""
+        log_group = QGroupBox("System Log")
         log_layout = QVBoxLayout()
         
         self.log_text = QTextEdit()
@@ -633,8 +724,8 @@ class MineGUI(QMainWindow):
         self.log_text.setMaximumHeight(120)
         log_layout.addWidget(self.log_text)
         
-        # 清除按钮
-        self.clear_log_button = QPushButton("清除日志")
+        # Clear button
+        self.clear_log_button = QPushButton("Clear Log")
         self.clear_log_button.clicked.connect(self.clear_log)
         log_layout.addWidget(self.clear_log_button)
         
@@ -642,271 +733,270 @@ class MineGUI(QMainWindow):
         parent_layout.addWidget(log_group)
     
     def create_display_area(self):
-        """创建右侧显示区域"""
-        # 创建显示区域容器
+        """Create right display area"""
+        # Create display area container
         self.display_area = QFrame()
         self.display_area.setFrameShape(QFrame.StyledPanel)
         
-        # 显示区域布局
+        # Display area layout
         display_layout = QVBoxLayout(self.display_area)
         
-        # 创建视图控制工具栏
+        # Create view control toolbar
         view_toolbar = QToolBar()
         view_toolbar.setIconSize(QSize(16, 16))
         view_toolbar.setMovable(False)
         
-        # 添加视图控制按钮
-        zoom_in_action = QAction("放大", self)
+        # Add view control buttons
+        zoom_in_action = QAction("Zoom In", self)
         zoom_in_action.triggered.connect(self.zoom_in)
         view_toolbar.addAction(zoom_in_action)
         
-        zoom_out_action = QAction("缩小", self)
+        zoom_out_action = QAction("Zoom Out", self)
         zoom_out_action.triggered.connect(self.zoom_out)
         view_toolbar.addAction(zoom_out_action)
         
-        fit_view_action = QAction("适应视图", self)
+        fit_view_action = QAction("Fit View", self)
         fit_view_action.triggered.connect(self.fit_view)
         view_toolbar.addAction(fit_view_action)
         
         display_layout.addWidget(view_toolbar)
         
-        # 创建图形视图
+        # Create graphics view
         self.graphics_view = QGraphicsView()
         self.graphics_view.setRenderHint(QPainter.Antialiasing)
         self.graphics_view.setViewportUpdateMode(QGraphicsView.FullViewportUpdate)
         
-        # 设置场景
+        # Set scene
         self.graphics_scene = QGraphicsScene()
         self.graphics_view.setScene(self.graphics_scene)
         
         display_layout.addWidget(self.graphics_view)
         
-        # 添加到主布局
+        # Add to main layout
         self.main_layout.addWidget(self.display_area, 3)
     
     def create_menu_bar(self):
-        """创建菜单栏"""
+        """Create menu bar"""
         menubar = self.menuBar()
         
-        # 文件菜单
-        file_menu = menubar.addMenu("文件")
+        # File menu
+        file_menu = menubar.addMenu("File")
         
-        open_action = QAction("打开地图", self)
+        open_action = QAction("Open Map", self)
         open_action.triggered.connect(self.open_map_file)
         file_menu.addAction(open_action)
         
-        save_action = QAction("保存结果", self)
+        save_action = QAction("Save Results", self)
         save_action.triggered.connect(self.save_results)
         file_menu.addAction(save_action)
         
         file_menu.addSeparator()
         
-        exit_action = QAction("退出", self)
+        exit_action = QAction("Exit", self)
         exit_action.triggered.connect(self.close)
         file_menu.addAction(exit_action)
         
-        # 视图菜单
-        view_menu = menubar.addMenu("视图")
+        # View menu
+        view_menu = menubar.addMenu("View")
         
-        self.show_backbone_action = QAction("显示主干路径", self, checkable=True)
+        self.show_backbone_action = QAction("Show Backbone Paths", self, checkable=True)
         self.show_backbone_action.setChecked(True)
         self.show_backbone_action.triggered.connect(self.toggle_backbone_display)
         view_menu.addAction(self.show_backbone_action)
         
-        self.show_vehicles_action = QAction("显示车辆", self, checkable=True)
+        self.show_vehicles_action = QAction("Show Vehicles", self, checkable=True)
         self.show_vehicles_action.setChecked(True)
         self.show_vehicles_action.triggered.connect(self.toggle_vehicles_display)
         view_menu.addAction(self.show_vehicles_action)
         
-        # 工具菜单
-        tools_menu = menubar.addMenu("工具")
+        # Tools menu
+        tools_menu = menubar.addMenu("Tools")
         
-        generate_network_action = QAction("生成主干网络", self)
+        generate_network_action = QAction("Generate Backbone Network", self)
         generate_network_action.triggered.connect(self.generate_backbone_network)
         tools_menu.addAction(generate_network_action)
         
-        optimize_paths_action = QAction("优化路径", self)
+        optimize_paths_action = QAction("Optimize Paths", self)
         optimize_paths_action.triggered.connect(self.optimize_paths)
         tools_menu.addAction(optimize_paths_action)
         
-        # 帮助菜单
-        help_menu = menubar.addMenu("帮助")
+        # Help menu
+        help_menu = menubar.addMenu("Help")
         
-        about_action = QAction("关于", self)
+        about_action = QAction("About", self)
         about_action.triggered.connect(self.show_about)
         help_menu.addAction(about_action)
     
     def create_tool_bar(self):
-        """创建工具栏"""
-        toolbar = QToolBar("主工具栏")
+        """Create toolbar"""
+        toolbar = QToolBar("Main Toolbar")
         toolbar.setMovable(False)
         toolbar.setIconSize(QSize(24, 24))
         self.addToolBar(toolbar)
         
-        # 打开地图
-        open_action = QAction("打开地图", self)
+        # Open map
+        open_action = QAction("Open Map", self)
         open_action.triggered.connect(self.open_map_file)
         toolbar.addAction(open_action)
         
         toolbar.addSeparator()
         
-        # 模拟控制
-        self.start_sim_action = QAction("开始", self)
+        # Simulation control
+        self.start_sim_action = QAction("Start", self)
         self.start_sim_action.triggered.connect(self.start_simulation)
         toolbar.addAction(self.start_sim_action)
         
-        self.pause_sim_action = QAction("暂停", self)
+        self.pause_sim_action = QAction("Pause", self)
         self.pause_sim_action.triggered.connect(self.pause_simulation)
         self.pause_sim_action.setEnabled(False)
         toolbar.addAction(self.pause_sim_action)
         
-        self.reset_sim_action = QAction("重置", self)
+        self.reset_sim_action = QAction("Reset", self)
         self.reset_sim_action.triggered.connect(self.reset_simulation)
         toolbar.addAction(self.reset_sim_action)
         
         toolbar.addSeparator()
         
-        # 主干网络生成
-        self.generate_network_action = QAction("生成主干网络", self)
+        # Backbone network generation
+        self.generate_network_action = QAction("Generate Backbone Network", self)
         self.generate_network_action.triggered.connect(self.generate_backbone_network)
         toolbar.addAction(self.generate_network_action)
     
-    # 事件处理方法
+    # Event handling methods
     def open_map_file(self):
-        """打开地图文件"""
+        """Open map file"""
         file_path, _ = QFileDialog.getOpenFileName(
-            self, "打开地图文件", "", 
-            "矿山地图文件 (*.json);;所有文件 (*)"
+            self, "Open Map File", "", 
+            "Mine Map Files (*.json);;All Files (*)"
         )
         
         if file_path:
             self.map_path.setText(os.path.basename(file_path))
             self.map_file_path = file_path
-            self.log("已选择地图文件: " + os.path.basename(file_path))
+            self.log("Map file selected: " + os.path.basename(file_path))
     
     def load_environment(self):
-        """加载环境"""
+        """Load environment"""
         if not hasattr(self, 'map_file_path') or not self.map_file_path:
-            self.log("请先选择地图文件!", "error")
+            self.log("Please select a map file first!", "error")
             return
         
         try:
-            self.log("正在加载环境...")
+            self.log("Loading environment...")
             
-            # 加载环境（实际实现时替换为实际的环境加载代码）
-            # 示例：使用环境加载器
+            # Load environment using the environment loader
             from mine_loader import MineEnvironmentLoader
             loader = MineEnvironmentLoader()
             self.env = loader.load_environment(self.map_file_path)
             
-            # 更新环境信息显示
+            # Update environment info display
             self.update_env_info()
             
-            # 更新车辆下拉框
+            # Update vehicle dropdown
             self.update_vehicle_combo()
             
-            # 创建场景
+            # Create scene
             self.create_scene()
             
-            self.log("环境加载成功: " + os.path.basename(self.map_file_path))
+            self.log("Environment loaded: " + os.path.basename(self.map_file_path))
             
-            # 创建其他系统组件
+            # Create other system components
             self.create_system_components()
             
-            # 启用相关按钮
+            # Enable relevant buttons
             self.enable_controls(True)
             
         except Exception as e:
-            self.log(f"加载环境失败: {str(e)}", "error")
+            self.log(f"Failed to load environment: {str(e)}", "error")
     
     def update_env_info(self):
-        """更新环境信息显示"""
+        """Update environment information display"""
         if not self.env:
             return
         
-        # 更新标签值
-        self.env_info_values["宽度:"].setText(str(self.env.width))
-        self.env_info_values["高度:"].setText(str(self.env.height))
-        self.env_info_values["装载点:"].setText(str(len(self.env.loading_points)))
-        self.env_info_values["卸载点:"].setText(str(len(self.env.unloading_points)))
-        self.env_info_values["车辆数:"].setText(str(len(self.env.vehicles)))
+        # Update labels
+        self.env_info_values["Width:"].setText(str(self.env.width))
+        self.env_info_values["Height:"].setText(str(self.env.height))
+        self.env_info_values["Loading Points:"].setText(str(len(self.env.loading_points)))
+        self.env_info_values["Unloading Points:"].setText(str(len(self.env.unloading_points)))
+        self.env_info_values["Vehicles:"].setText(str(len(self.env.vehicles)))
     
     def update_vehicle_combo(self):
-        """更新车辆下拉框"""
+        """Update vehicle dropdown"""
         self.vehicle_combo.clear()
         
         if not self.env:
             return
         
         for v_id in sorted(self.env.vehicles.keys()):
-            self.vehicle_combo.addItem(f"车辆 {v_id}", v_id)
+            self.vehicle_combo.addItem(f"Vehicle {v_id}", v_id)
     
     def create_scene(self):
-        """创建场景"""
-        # 清除现有场景
+        """Create scene"""
+        # Clear existing scene
         self.graphics_scene.clear()
         
         if not self.env:
             return
         
-        # 设置场景大小
+        # Set scene size
         self.graphics_scene.setSceneRect(0, 0, self.env.width, self.env.height)
         
-        # 绘制背景网格
+        # Draw background grid
         self.draw_grid()
         
-        # 绘制障碍物
+        # Draw obstacles
         self.draw_obstacles()
         
-        # 绘制关键点（装载点、卸载点等）
+        # Draw key points (loading points, unloading points, etc.)
         self.draw_key_points()
         
-        # 绘制车辆
+        # Draw vehicles
         self.draw_vehicles()
         
-        # 调整视图以显示整个场景
+        # Adjust view to show entire scene
         self.fit_view()
     
     def draw_grid(self):
-        """绘制背景网格"""
+        """Draw background grid"""
         if not self.env:
             return
         
-        # 设置网格大小
+        # Set grid size
         grid_size = 10
         
-        # 网格线颜色
+        # Grid line color
         grid_pen = QPen(QColor(220, 220, 220))
         grid_pen.setWidth(0)
         
-        # 主网格线颜色
+        # Major grid line color
         major_grid_pen = QPen(QColor(200, 200, 200))
         major_grid_pen.setWidth(0)
         
-        # 绘制垂直线
+        # Draw vertical lines
         for x in range(0, self.env.width + 1, grid_size):
             if x % (grid_size * 5) == 0:
-                # 主网格线
+                # Major grid line
                 line = self.graphics_scene.addLine(x, 0, x, self.env.height, major_grid_pen)
             else:
-                # 次网格线
+                # Minor grid line
                 line = self.graphics_scene.addLine(x, 0, x, self.env.height, grid_pen)
             
-            line.setZValue(-100)  # 确保网格在最底层
+            line.setZValue(-100)  # Ensure grid is in bottom layer
         
-        # 绘制水平线
+        # Draw horizontal lines
         for y in range(0, self.env.height + 1, grid_size):
             if y % (grid_size * 5) == 0:
-                # 主网格线
+                # Major grid line
                 line = self.graphics_scene.addLine(0, y, self.env.width, y, major_grid_pen)
             else:
-                # 次网格线
+                # Minor grid line
                 line = self.graphics_scene.addLine(0, y, self.env.width, y, grid_pen)
             
-            line.setZValue(-100)  # 确保网格在最底层
+            line.setZValue(-100)  # Ensure grid is in bottom layer
         
-        # 添加坐标标签
-        label_interval = 50  # 每50个单位显示一个标签
+        # Add coordinate labels
+        label_interval = 50  # Show label every 50 units
         
         for x in range(0, self.env.width + 1, label_interval):
             label = self.graphics_scene.addText(str(x))
@@ -921,31 +1011,35 @@ class MineGUI(QMainWindow):
             label.setZValue(-90)
     
     def draw_obstacles(self):
-        """绘制障碍物"""
+        """Draw obstacles"""
         if not self.env:
             return
         
-        # 障碍物颜色
+        # Obstacle color
         obstacle_brush = QBrush(QColor(80, 80, 90))
         obstacle_pen = QPen(QColor(60, 60, 70), 0.5)
         
-        # 遍历环境网格，标记障碍物
-        for x in range(self.env.width):
-            for y in range(self.env.height):
-                if self.env.grid[x, y] == 1:  # 障碍物
-                    rect = self.graphics_scene.addRect(x, y, 1, 1, obstacle_pen, obstacle_brush)
-                    rect.setZValue(-50)  # 确保在网格之上
+        # Find contiguous obstacle regions (for efficiency)
+        obstacles = self.env._get_obstacle_list()
+        
+        for obstacle in obstacles:
+            x, y = obstacle['x'], obstacle['y']
+            width, height = obstacle['width'], obstacle['height']
+            
+            # Create rectangle
+            rect = self.graphics_scene.addRect(x, y, width, height, obstacle_pen, obstacle_brush)
+            rect.setZValue(-50)  # Ensure above grid
     
     def draw_key_points(self):
-        """绘制关键点（装载点、卸载点等）"""
+        """Draw key points (loading points, unloading points)"""
         if not self.env:
             return
         
-        # 装载点
+        # Loading points
         for i, point in enumerate(self.env.loading_points):
-            x, y = point
+            x, y = point[0], point[1]
             
-            # 创建装载点图形
+            # Create loading point graphic
             radius = 4.0
             loading_item = self.graphics_scene.addEllipse(
                 x - radius, y - radius, radius * 2, radius * 2,
@@ -954,17 +1048,17 @@ class MineGUI(QMainWindow):
             )
             loading_item.setZValue(5)
             
-            # 添加标签
-            text = self.graphics_scene.addText(f"装载点{i+1}")
+            # Add label
+            text = self.graphics_scene.addText(f"Loading Point {i+1}")
             text.setPos(x - 20, y - 15)
             text.setDefaultTextColor(QColor(0, 120, 0))
             text.setZValue(5)
         
-        # 卸载点
+        # Unloading points
         for i, point in enumerate(self.env.unloading_points):
-            x, y = point
+            x, y = point[0], point[1]
             
-            # 创建卸载点图形
+            # Create unloading point graphic
             radius = 4.0
             unloading_item = self.graphics_scene.addEllipse(
                 x - radius, y - radius, radius * 2, radius * 2,
@@ -973,65 +1067,62 @@ class MineGUI(QMainWindow):
             )
             unloading_item.setZValue(5)
             
-            # 添加标签
-            text = self.graphics_scene.addText(f"卸载点{i+1}")
+            # Add label
+            text = self.graphics_scene.addText(f"Unloading Point {i+1}")
             text.setPos(x - 20, y - 15)
             text.setDefaultTextColor(QColor(120, 0, 0))
             text.setZValue(5)
     
     def draw_vehicles(self):
-        """绘制车辆"""
+        """Draw vehicles"""
         if not self.env:
             return
         
-        # 清除现有车辆图形
-        for item in getattr(self, 'vehicle_items', {}).values():
-            self.graphics_scene.removeItem(item)
-        
+        # Clear existing vehicle graphics
         self.vehicle_items = {}
         
-        # 车辆颜色
+        # Vehicle colors
         vehicle_colors = {
-            'idle': QColor(128, 128, 128),      # 灰色
-            'moving': QColor(0, 123, 255),      # 蓝色
-            'loading': QColor(40, 167, 69),     # 绿色
-            'unloading': QColor(220, 53, 69)    # 红色
+            'idle': QColor(128, 128, 128),      # Gray
+            'moving': QColor(0, 123, 255),      # Blue
+            'loading': QColor(40, 167, 69),     # Green
+            'unloading': QColor(220, 53, 69)    # Red
         }
         
-        # 添加新车辆图形
+        # Add new vehicle graphics
         for vehicle_id, vehicle_data in self.env.vehicles.items():
-            # 获取车辆位置
+            # Get vehicle position
             position = vehicle_data.get('position', (0, 0, 0))
             x, y, theta = position
             
-            # 创建车辆图形
+            # Create vehicle graphic
             vehicle_length = 6.0
             vehicle_width = 3.0
             
-            # 构建车辆多边形
+            # Build vehicle polygon
             polygon = QPolygonF()
             
-            # 计算车辆四个角点的相对坐标（默认朝向为Y轴正方向）
+            # Calculate vehicle corners (default facing Y-axis direction)
             half_length = vehicle_length / 2
             half_width = vehicle_width / 2
             
             corners = [
-                QPointF(half_width, half_length),     # 右前
-                QPointF(-half_width, half_length),    # 左前
-                QPointF(-half_width, -half_length),   # 左后
-                QPointF(half_width, -half_length)     # 右后
+                QPointF(half_width, half_length),     # Front right
+                QPointF(-half_width, half_length),    # Front left
+                QPointF(-half_width, -half_length),   # Rear left
+                QPointF(half_width, -half_length)     # Rear right
             ]
             
-            # 创建旋转和平移变换
+            # Create rotation and translation transform
             transform = QTransform()
-            transform.rotate(theta * 180 / math.pi)  # 旋转（角度制）
-            transform.translate(x, y)  # 平移
+            transform.rotate(theta * 180 / math.pi)  # Rotation (in degrees)
+            transform.translate(x, y)  # Translation
             
-            # 应用变换并添加到多边形
+            # Apply transform and add to polygon
             for corner in corners:
                 polygon.append(transform.map(corner))
             
-            # 创建车辆图形项
+            # Create vehicle graphic item
             status = vehicle_data.get('status', 'idle')
             color = vehicle_colors.get(status, vehicle_colors['idle'])
             
@@ -1040,337 +1131,368 @@ class MineGUI(QMainWindow):
                 QPen(Qt.black, 0.5),
                 QBrush(color)
             )
-            vehicle_item.setZValue(10)  # 确保车辆在最上层
+            vehicle_item.setZValue(10)  # Ensure vehicles are on top
             
-            # 添加车辆ID标签
+            # Add vehicle ID label
             label = self.graphics_scene.addText(str(vehicle_id))
             label.setPos(x - 5, y - 5)
             label.setDefaultTextColor(Qt.white)
             label.setZValue(11)
             
-            # 存储车辆图形项（包括多边形和标签）
+            # Store vehicle graphic item (polygon and label)
             self.vehicle_items[vehicle_id] = {
                 'polygon': vehicle_item,
                 'label': label
             }
     
     def create_system_components(self):
-        """创建系统其他组件"""
+        """Create system components (backbone network, path planner, etc.)"""
         if not self.env:
             return
         
-        # 创建主干路径网络
+        # Create backbone path network
         self.backbone_network = BackbonePathNetwork(self.env)
         
-        # 创建路径规划器
+        # Create path planner
         self.path_planner = PathPlanner(self.env)
         
-        # 创建车辆调度器
-        self.vehicle_scheduler = VehicleScheduler(self.env, self.path_planner)
+        # Set backbone network to path planner
+        self.path_planner.set_backbone_network(self.backbone_network)
         
-        # 创建交通管理器
-        self.traffic_manager = TrafficManager(self.env)
+        # Create ECBS-enhanced traffic manager
+        self.traffic_manager = TrafficManager(self.env, self.backbone_network)
         
-        # 初始化车辆状态
+        # Create vehicle scheduler (using ECBS-enhanced version if available)
+        try:
+            # Try to use ECBS-enhanced scheduler
+            self.vehicle_scheduler = ECBSVehicleScheduler(
+                self.env, 
+                self.path_planner, 
+                self.traffic_manager
+            )
+            self.log("Using ECBS-enhanced vehicle scheduler")
+        except:
+            # Fall back to regular scheduler
+            self.vehicle_scheduler = VehicleScheduler(self.env, self.path_planner)
+            self.log("Using standard vehicle scheduler")
+        
+        # Initialize vehicle statuses
         self.vehicle_scheduler.initialize_vehicles()
         
-        # 创建任务模板
+        # Create task template
         if self.env.loading_points and self.env.unloading_points:
-            self.vehicle_scheduler.create_mission_template("default")
+            if isinstance(self.vehicle_scheduler, ECBSVehicleScheduler):
+                self.vehicle_scheduler.create_ecbs_mission_template("default")
+            else:
+                self.vehicle_scheduler.create_mission_template("default")
         
-        self.log("系统组件初始化完成")
+        self.log("System components initialized")
     
     def generate_backbone_network(self):
-        """生成主干路径网络"""
+        """Generate backbone path network"""
         if not self.env:
-            self.log("请先加载环境!", "error")
+            self.log("Please load environment first!", "error")
             return
         
         try:
-            self.log("正在生成主干路径网络...")
+            self.log("Generating backbone path network...")
             
-            # 生成网络
+            # Generate network
             self.backbone_network.generate_network()
             
-            # 更新路径信息显示
+            # Update path info display
             self.update_path_info()
             
-            # 设置规划器和交通管理器
+            # Set backbone network to planner and traffic manager
             self.path_planner.set_backbone_network(self.backbone_network)
             self.traffic_manager.set_backbone_network(self.backbone_network)
             
-            # 绘制主干路径网络
+            # Draw backbone network
             self.draw_backbone_network()
             
-            self.log(f"主干路径网络生成成功 - {len(self.backbone_network.paths)} 条路径")
+            self.log(f"Backbone path network generated - {len(self.backbone_network.paths)} paths")
             
         except Exception as e:
-            self.log(f"生成主干路径网络失败: {str(e)}", "error")
+            self.log(f"Failed to generate backbone network: {str(e)}", "error")
     
     def update_path_info(self):
-        """更新路径信息显示"""
+        """Update path information display"""
         if not self.backbone_network:
             return
         
-        # 计算统计信息
+        # Calculate statistics
         num_paths = len(self.backbone_network.paths)
         num_connections = len(self.backbone_network.connections)
         
         total_length = 0
         for path_data in self.backbone_network.paths.values():
-            total_length += path_data['length']
+            total_length += path_data.get('length', 0)
         
         avg_length = total_length / num_paths if num_paths > 0 else 0
         
-        # 更新显示
-        self.path_info_values["路径总数:"].setText(str(num_paths))
-        self.path_info_values["连接点总数:"].setText(str(num_connections))
-        self.path_info_values["总长度:"].setText(f"{total_length:.1f}")
-        self.path_info_values["平均长度:"].setText(f"{avg_length:.1f}")
+        # Update display
+        self.path_info_values["Total Paths:"].setText(str(num_paths))
+        self.path_info_values["Connection Points:"].setText(str(num_connections))
+        self.path_info_values["Total Length:"].setText(f"{total_length:.1f}")
+        self.path_info_values["Average Length:"].setText(f"{avg_length:.1f}")
     
     def draw_backbone_network(self):
-        """绘制主干路径网络"""
-        # 清除现有主干网络图形
+        """Draw backbone path network"""
+        # Clear existing backbone network graphic
         if hasattr(self, 'backbone_visualizer'):
             self.graphics_scene.removeItem(self.backbone_visualizer)
         
-        # 创建新的可视化器
+        # Create new visualizer
         self.backbone_visualizer = BackbonePathVisualizer(self.backbone_network)
         self.graphics_scene.addItem(self.backbone_visualizer)
     
     def update_display(self):
-        """更新显示（由定时器触发）"""
+        """Update display (triggered by timer)"""
         if not self.env:
             return
         
-        # 更新车辆位置
+        # Update vehicle positions
         self.update_vehicles()
         
-        # 更新选中车辆信息
+        # Update selected vehicle info
         index = self.vehicle_combo.currentIndex()
         if index >= 0:
             self.update_vehicle_info(index)
         
-        # 更新任务信息
+        # Update task info
         self.update_task_list()
         
-        # 更新主干网络流量可视化
+        # Update backbone network traffic flow visualization
         if hasattr(self, 'backbone_visualizer') and self.backbone_visualizer:
             self.backbone_visualizer.update_traffic_flow()
+        
+        # Display ECBS conflict resolution status if available
+        if self.traffic_manager and self.vehicle_scheduler:
+            # Check for any active conflicts
+            conflicts_resolved = 0
+            if hasattr(self.vehicle_scheduler, 'conflict_counts'):
+                conflicts_resolved = sum(self.vehicle_scheduler.conflict_counts.values())
+            
+            if conflicts_resolved > 0:
+                self.statusBar().showMessage(f"ECBS resolved {conflicts_resolved} path conflicts")
+                
+                # Update the conflict information in the task tab
+                if hasattr(self, 'conflict_info_label'):
+                    self.conflict_info_label.setText(f"Resolved conflicts: {conflicts_resolved}")
     
     def update_vehicles(self):
-        """更新车辆位置和状态"""
+        """Update vehicle positions and status"""
         if not self.env or not hasattr(self, 'vehicle_items'):
             return
         
-        # 车辆颜色
+        # Vehicle colors
         vehicle_colors = {
-            'idle': QColor(128, 128, 128),      # 灰色
-            'moving': QColor(0, 123, 255),      # 蓝色
-            'loading': QColor(40, 167, 69),     # 绿色
-            'unloading': QColor(220, 53, 69)    # 红色
+            'idle': QColor(128, 128, 128),      # Gray
+            'moving': QColor(0, 123, 255),      # Blue
+            'loading': QColor(40, 167, 69),     # Green
+            'unloading': QColor(220, 53, 69)    # Red
         }
         
-        # 更新所有车辆
+        # Update all vehicles
         for vehicle_id, vehicle_data in self.env.vehicles.items():
-            # 获取车辆位置
+            # Get vehicle position
             position = vehicle_data.get('position', (0, 0, 0))
             x, y, theta = position
             
-            # 如果车辆已经有图形项
+            # If vehicle already has graphic item
             if vehicle_id in self.vehicle_items:
                 items = self.vehicle_items[vehicle_id]
                 
-                # 获取状态
+                # Get status
                 status = vehicle_data.get('status', 'idle')
                 color = vehicle_colors.get(status, vehicle_colors['idle'])
                 
-                # 更新多边形
+                # Update polygon
                 vehicle_length = 6.0
                 vehicle_width = 3.0
                 
-                # 构建车辆多边形
+                # Build vehicle polygon
                 polygon = QPolygonF()
                 
-                # 计算车辆四个角点的相对坐标
+                # Calculate vehicle corners
                 half_length = vehicle_length / 2
                 half_width = vehicle_width / 2
                 
                 corners = [
-                    QPointF(half_width, half_length),     # 右前
-                    QPointF(-half_width, half_length),    # 左前
-                    QPointF(-half_width, -half_length),   # 左后
-                    QPointF(half_width, -half_length)     # 右后
+                    QPointF(half_width, half_length),     # Front right
+                    QPointF(-half_width, half_length),    # Front left
+                    QPointF(-half_width, -half_length),   # Rear left
+                    QPointF(half_width, -half_length)     # Rear right
                 ]
                 
-                # 创建旋转和平移变换
+                # Create rotation and translation transform
                 transform = QTransform()
-                transform.rotate(theta * 180 / math.pi)  # 旋转（角度制）
-                transform.translate(x, y)  # 平移
+                transform.rotate(theta * 180 / math.pi)  # Rotation (in degrees)
+                transform.translate(x, y)  # Translation
                 
-                # 应用变换并添加到多边形
+                # Apply transform and add to polygon
                 for corner in corners:
                     polygon.append(transform.map(corner))
                 
-                # 更新多边形
+                # Update polygon
                 items['polygon'].setPolygon(polygon)
                 items['polygon'].setBrush(QBrush(color))
                 
-                # 更新标签位置
+                # Update label position
                 items['label'].setPos(x - 5, y - 5)
     
     def update_vehicle_info(self, index):
-        """更新车辆信息显示"""
+        """Update vehicle information display"""
         if not self.env or index < 0:
             return
         
-        # 获取选中的车辆ID
+        # Get selected vehicle ID
         vehicle_id = self.vehicle_combo.itemData(index)
         
         if vehicle_id not in self.env.vehicles:
             return
         
-        # 获取车辆信息
+        # Get vehicle information
         vehicle_data = self.env.vehicles[vehicle_id]
         
-        # 如果有调度器，获取更详细的信息
+        # Get more detailed info from scheduler if available
         if self.vehicle_scheduler:
             vehicle_info = self.vehicle_scheduler.get_vehicle_info(vehicle_id)
         else:
             vehicle_info = vehicle_data
         
-        # 更新显示
+        # Update display
         position = vehicle_data.get('position', (0, 0, 0))
         self.vehicle_info_values["ID:"].setText(str(vehicle_id))
-        self.vehicle_info_values["位置:"].setText(f"({position[0]:.1f}, {position[1]:.1f})")
+        self.vehicle_info_values["Position:"].setText(f"({position[0]:.1f}, {position[1]:.1f})")
         
         status = vehicle_data.get('status', 'idle')
         status_map = {
-            'idle': '空闲',
-            'moving': '移动中',
-            'loading': '装载中',
-            'unloading': '卸载中'
+            'idle': 'Idle',
+            'moving': 'Moving',
+            'loading': 'Loading',
+            'unloading': 'Unloading'
         }
-        self.vehicle_info_values["状态:"].setText(status_map.get(status, status))
+        self.vehicle_info_values["Status:"].setText(status_map.get(status, status))
         
         load = vehicle_data.get('load', 0)
         max_load = vehicle_data.get('max_load', 100)
-        self.vehicle_info_values["载重:"].setText(f"{load}/{max_load}")
+        self.vehicle_info_values["Load:"].setText(f"{load}/{max_load}")
         
-        # 显示当前任务
+        # Show current task
         if vehicle_info and 'current_task' in vehicle_info and vehicle_info['current_task']:
             task_id = vehicle_info['current_task']
             if task_id in self.vehicle_scheduler.tasks:
                 task = self.vehicle_scheduler.tasks[task_id]
                 task_text = f"{task.task_type} ({task.progress:.0%})"
-                self.vehicle_info_values["当前任务:"].setText(task_text)
+                self.vehicle_info_values["Current Task:"].setText(task_text)
             else:
-                self.vehicle_info_values["当前任务:"].setText(str(task_id))
+                self.vehicle_info_values["Current Task:"].setText(str(task_id))
         else:
-            self.vehicle_info_values["当前任务:"].setText("无")
+            self.vehicle_info_values["Current Task:"].setText("None")
         
-        # 显示已完成任务数
+        # Show completed tasks
         completed = vehicle_info.get('completed_tasks', 0) if vehicle_info else 0
-        self.vehicle_info_values["完成任务:"].setText(str(completed))
+        self.vehicle_info_values["Completed Tasks:"].setText(str(completed))
     
     def update_task_list(self):
-        """更新任务列表"""
+        """Update task list"""
         if not self.vehicle_scheduler:
             return
         
-        # 保存当前选择
+        # Save current selection
         current_item = self.task_list.currentItem()
         current_task_id = current_item.data(Qt.UserRole) if current_item else None
         
-        # 清除列表
+        # Clear list
         self.task_list.clear()
         
-        # 添加所有任务
+        # Add all tasks
         for task_id, task in self.vehicle_scheduler.tasks.items():
             item = QListWidgetItem(f"{task_id} - {task.task_type} ({task.status})")
             item.setData(Qt.UserRole, task_id)
             
-            # 根据状态设置颜色
+            # Set color based on status
             if task.status == 'completed':
-                item.setForeground(QBrush(QColor(40, 167, 69)))  # 绿色
+                item.setForeground(QBrush(QColor(40, 167, 69)))  # Green
             elif task.status == 'failed':
-                item.setForeground(QBrush(QColor(220, 53, 69)))  # 红色
+                item.setForeground(QBrush(QColor(220, 53, 69)))  # Red
             elif task.status == 'in_progress':
-                item.setForeground(QBrush(QColor(0, 123, 255)))  # 蓝色
+                item.setForeground(QBrush(QColor(0, 123, 255)))  # Blue
             
             self.task_list.addItem(item)
             
-            # 如果是之前选中的任务，重新选中
+            # Re-select previously selected task
             if task_id == current_task_id:
                 self.task_list.setCurrentItem(item)
         
-        # 更新统计信息
+        # Update statistics
         stats = self.vehicle_scheduler.get_stats()
         
-        self.task_stats_values["总任务数:"].setText(str(len(self.vehicle_scheduler.tasks)))
-        self.task_stats_values["完成任务:"].setText(str(stats['completed_tasks']))
-        self.task_stats_values["失败任务:"].setText(str(stats['failed_tasks']))
+        self.task_stats_values["Total Tasks:"].setText(str(len(self.vehicle_scheduler.tasks)))
+        self.task_stats_values["Completed Tasks:"].setText(str(stats['completed_tasks']))
+        self.task_stats_values["Failed Tasks:"].setText(str(stats['failed_tasks']))
         
         avg_util = stats.get('average_utilization', 0)
-        self.task_stats_values["平均利用率:"].setText(f"{avg_util:.1%}")
+        self.task_stats_values["Average Utilization:"].setText(f"{avg_util:.1%}")
         
-        # 如果环境有当前时间，显示运行时间
+        # If environment has current time, show runtime
         if hasattr(self.env, 'current_time'):
-            self.task_stats_values["总运行时间:"].setText(f"{self.env.current_time:.1f}")
+            self.task_stats_values["Total Runtime:"].setText(f"{self.env.current_time:.1f}")
     
     def update_task_info(self, item):
-        """更新任务信息显示"""
+        """Update task information display"""
         if not item or not self.vehicle_scheduler:
             return
         
-        # 获取任务ID
+        # Get task ID
         task_id = item.data(Qt.UserRole)
         
         if task_id not in self.vehicle_scheduler.tasks:
             return
         
-        # 获取任务信息
+        # Get task information
         task = self.vehicle_scheduler.tasks[task_id]
         
-        # 更新显示
+        # Update display
         self.task_info_values["ID:"].setText(task.task_id)
-        self.task_info_values["类型:"].setText(task.task_type)
-        self.task_info_values["状态:"].setText(task.status)
-        self.task_info_values["车辆:"].setText(str(task.assigned_vehicle) if task.assigned_vehicle else "未分配")
-        self.task_info_values["进度:"].setText(f"{task.progress:.0%}")
-        self.task_info_values["开始时间:"].setText(f"{task.start_time:.1f}" if task.start_time else "--")
-        self.task_info_values["完成时间:"].setText(f"{task.completion_time:.1f}" if task.completion_time else "--")
+        self.task_info_values["Type:"].setText(task.task_type)
+        self.task_info_values["Status:"].setText(task.status)
+        self.task_info_values["Vehicle:"].setText(str(task.assigned_vehicle) if task.assigned_vehicle else "Unassigned")
+        self.task_info_values["Progress:"].setText(f"{task.progress:.0%}")
+        self.task_info_values["Start Time:"].setText(f"{task.start_time:.1f}" if task.start_time else "--")
+        self.task_info_values["Completion Time:"].setText(f"{task.completion_time:.1f}" if task.completion_time else "--")
     
     def enable_controls(self, enabled):
-        """启用或禁用控制按钮"""
-        # 环境选项卡
+        """Enable or disable control buttons"""
+        # Environment tab
         self.start_button.setEnabled(enabled)
         self.reset_button.setEnabled(enabled)
         
-        # 工具栏
+        # Toolbar
         self.start_sim_action.setEnabled(enabled)
         self.reset_sim_action.setEnabled(enabled)
         
-        # 路径选项卡
+        # Path tab
         self.generate_paths_button.setEnabled(enabled)
         
-        # 车辆选项卡按钮
+        # Vehicle tab buttons
         self.assign_task_button.setEnabled(enabled)
         self.cancel_task_button.setEnabled(enabled)
         self.goto_loading_button.setEnabled(enabled)
         self.goto_unloading_button.setEnabled(enabled)
         self.return_button.setEnabled(enabled)
         
-        # 任务选项卡按钮
+        # Task tab buttons
         self.create_template_button.setEnabled(enabled)
         self.auto_assign_button.setEnabled(enabled)
     
     def log(self, message, level="info"):
-        """添加日志消息"""
-        # 获取当前时间
+        """Add log message"""
+        # Get current time
         current_time = time.strftime("%H:%M:%S")
         
-        # 根据日志级别设置颜色
+        # Set color based on log level
         if level == "error":
             color = "red"
         elif level == "warning":
@@ -1380,213 +1502,224 @@ class MineGUI(QMainWindow):
         else:
             color = "black"
         
-        # 格式化消息
+        # Format message
         formatted_message = f'<span style="color: {color};">[{current_time}] {message}</span>'
         
-        # 添加到日志文本框
+        # Add to log text box
         self.log_text.append(formatted_message)
         
-        # 滚动到底部
+        # Scroll to bottom
         scrollbar = self.log_text.verticalScrollBar()
         scrollbar.setValue(scrollbar.maximum())
         
-        # 同时更新状态栏
+        # Also update status bar
         self.statusBar().showMessage(message)
     
     def clear_log(self):
-        """清除日志"""
+        """Clear log"""
         self.log_text.clear()
     
-    # 视图控制方法
+    # View control methods
     def zoom_in(self):
-        """放大视图"""
+        """Zoom in"""
         self.graphics_view.scale(1.2, 1.2)
     
     def zoom_out(self):
-        """缩小视图"""
+        """Zoom out"""
         self.graphics_view.scale(1/1.2, 1/1.2)
     
     def fit_view(self):
-        """调整视图以显示整个场景"""
+        """Fit view to show entire scene"""
         self.graphics_view.fitInView(self.graphics_scene.sceneRect(), Qt.KeepAspectRatio)
     
-    # 模拟控制方法
+    # Simulation control methods
     def update_simulation_speed(self):
-        """更新模拟速度"""
+        """Update simulation speed"""
         value = self.speed_slider.value()
-        speed = value / 50.0  # 转换为速度倍率 (0.02-2.0)
+        speed = value / 50.0  # Convert to speed multiplier (0.02-2.0)
         
         self.speed_value.setText(f"{speed:.1f}x")
         
-        # 如果环境有时间步长属性，更新时间步长
+        # If environment has time step property, update it
         if hasattr(self.env, 'time_step'):
-            self.env.time_step = 0.5 * speed  # 基础时间步长 * 速度倍率
+            self.env.time_step = 0.5 * speed  # Base time step * speed multiplier
         
-        self.log(f"模拟速度已设置为 {speed:.1f}x")
+        self.log(f"Simulation speed set to {speed:.1f}x")
     
     def start_simulation(self):
-        """开始模拟"""
+        """Start simulation"""
         if not self.env:
-            self.log("请先加载环境!", "error")
+            self.log("Please load environment first!", "error")
             return
         
-        # 更新按钮状态
+        # Update button states
         self.start_button.setEnabled(False)
         self.pause_button.setEnabled(True)
         
         self.start_sim_action.setEnabled(False)
         self.pause_sim_action.setEnabled(True)
         
-        # 开始模拟逻辑
+        # Start simulation logic
         self.is_simulating = True
         
-        # 创建模拟定时器
+        # Create simulation timer
         if not hasattr(self, 'sim_timer'):
             self.sim_timer = QTimer(self)
             self.sim_timer.timeout.connect(self.simulation_step)
         
-        # 启动定时器
-        self.sim_timer.start(100)  # 100ms一次更新
+        # Start timer
+        self.sim_timer.start(100)  # Update every 100ms
         
-        self.log("模拟开始运行")
+        self.log("Simulation started")
     
     def pause_simulation(self):
-        """暂停模拟"""
-        # 更新按钮状态
+        """Pause simulation"""
+        # Update button states
         self.start_button.setEnabled(True)
         self.pause_button.setEnabled(False)
         
         self.start_sim_action.setEnabled(True)
         self.pause_sim_action.setEnabled(False)
         
-        # 暂停模拟逻辑
+        # Pause simulation logic
         self.is_simulating = False
         
-        # 停止定时器
+        # Stop timer
         if hasattr(self, 'sim_timer') and self.sim_timer.isActive():
             self.sim_timer.stop()
         
-        self.log("模拟已暂停")
+        self.log("Simulation paused")
     
     def reset_simulation(self):
-        """重置模拟"""
-        # 询问确认
+        """Reset simulation"""
+        # Ask for confirmation
         reply = QMessageBox.question(
-            self, '确认重置', 
-            '确定要重置模拟吗？这将清除所有当前数据。',
+            self, 'Confirm Reset', 
+            'Are you sure you want to reset the simulation? This will clear all current data.',
             QMessageBox.Yes | QMessageBox.No, QMessageBox.No
         )
         
         if reply != QMessageBox.Yes:
             return
         
-        # 停止模拟
+        # Stop simulation
         if hasattr(self, 'is_simulating') and self.is_simulating:
             self.pause_simulation()
         
-        # 重置环境
+        # Reset environment
         if self.env:
             self.env.reset()
         
-        # 重置调度器
+        # Reset scheduler
         if self.vehicle_scheduler:
             self.vehicle_scheduler.initialize_vehicles()
         
-        # 重置交通管理器
+        # Reset traffic manager
         if self.traffic_manager:
-            # 交通管理器没有显式的重置方法，可能需要重新创建
+            # Traffic manager has no explicit reset method, may need to recreate
             self.traffic_manager = TrafficManager(self.env)
             self.traffic_manager.set_backbone_network(self.backbone_network)
         
-        # 更新显示
+        # Update display
         self.create_scene()
         
-        # 如果已经生成了主干网络，重新绘制
-        if self.backbone_network and self.backbone_network.paths:
+        # If backbone network was generated, redraw it
+        if self.backbone_network and hasattr(self.backbone_network, 'paths') and self.backbone_network.paths:
             self.draw_backbone_network()
         
-        # 重置进度条
+        # Reset progress bar
         self.progress_bar.setValue(0)
         
-        # 更新车辆和任务信息
+        # Update vehicle and task info
         self.update_vehicle_combo()
         if self.vehicle_combo.count() > 0:
             self.update_vehicle_info(0)
         
         self.update_task_list()
         
-        self.log("模拟已重置")
+        self.log("Simulation reset")
     
     def simulation_step(self):
-        """模拟单步执行"""
+        """Single simulation step with ECBS conflict resolution"""
         if not self.is_simulating or not self.env:
             return
         
-        # 获取时间步长
+        # Get time step
         time_step = getattr(self.env, 'time_step', 0.5)
         
-        # 更新环境时间
+        # Update environment time
         if not hasattr(self.env, 'current_time'):
             self.env.current_time = 0
         
         self.env.current_time += time_step
         
-        # 更新车辆调度器
+        # Update vehicle scheduler with ECBS
         if self.vehicle_scheduler:
+            # For ECBSVehicleScheduler, the update method includes conflict detection and resolution
             self.vehicle_scheduler.update(time_step)
+            
+            # Check if there are any active conflicts
+            has_conflicts = False
+            if hasattr(self.traffic_manager, 'has_conflict'):
+                has_conflicts = self.traffic_manager.has_conflict
+            
+            # Log conflicts if they occur
+            if has_conflicts:
+                self.log("ECBS resolving path conflicts...", "warning")
         
-        # 更新进度条
-        max_time = 3600  # 最长模拟时间1小时
+        # Update progress bar
+        max_time = 3600  # Max simulation time: 1 hour
         progress = min(100, int(self.env.current_time * 100 / max_time))
         self.progress_bar.setValue(progress)
         
-        # 如果进度达到100%，自动停止
+        # If progress reaches 100%, auto-stop
         if progress >= 100:
             self.pause_simulation()
-            self.log("模拟已完成", "success")
+            self.log("Simulation completed", "success")
     
-    # 车辆操作方法
+    # Vehicle operation methods
     def assign_vehicle_task(self):
-        """为当前选中的车辆分配任务"""
+        """Assign task to currently selected vehicle using ECBS scheduling"""
         if not self.vehicle_scheduler:
-            self.log("车辆调度器未初始化", "error")
+            self.log("Vehicle scheduler not initialized", "error")
             return
         
-        # 获取选中的车辆
+        # Get selected vehicle
         index = self.vehicle_combo.currentIndex()
         if index < 0:
-            self.log("请先选择车辆", "warning")
+            self.log("Please select a vehicle first", "warning")
             return
         
         vehicle_id = self.vehicle_combo.itemData(index)
         
-        # 如果已经有任务模板，使用默认模板
+        # If there's a task template, use it with ECBS-aware assignment
         if "default" in self.vehicle_scheduler.mission_templates:
+            # Use the scheduler's assign_mission method
             if self.vehicle_scheduler.assign_mission(vehicle_id, "default"):
-                self.log(f"已为车辆 {vehicle_id} 分配默认任务", "success")
+                self.log(f"Assigned default mission to vehicle {vehicle_id}", "success")
             else:
-                self.log(f"为车辆 {vehicle_id} 分配任务失败", "error")
+                self.log(f"Failed to assign mission to vehicle {vehicle_id}", "error")
         else:
-            self.log("没有可用的任务模板", "error")
+            self.log("No available task template", "error")
     
     def cancel_vehicle_task(self):
-        """取消当前选中车辆的任务"""
+        """Cancel current vehicle's task"""
         if not self.vehicle_scheduler:
             return
         
-        # 获取选中的车辆
+        # Get selected vehicle
         index = self.vehicle_combo.currentIndex()
         if index < 0:
-            self.log("请先选择车辆", "warning")
+            self.log("Please select a vehicle first", "warning")
             return
         
         vehicle_id = self.vehicle_combo.itemData(index)
         
-        # 清空任务队列
+        # Clear task queue
         if vehicle_id in self.vehicle_scheduler.task_queues:
             self.vehicle_scheduler.task_queues[vehicle_id] = []
             
-            # 如果有当前任务，标记为完成
+            # If there's a current task, mark it as completed
             status = self.vehicle_scheduler.vehicle_statuses[vehicle_id]
             if status['current_task']:
                 task_id = status['current_task']
@@ -1596,36 +1729,36 @@ class MineGUI(QMainWindow):
                     task.progress = 1.0
                     task.completion_time = self.env.current_time if hasattr(self.env, 'current_time') else 0
                 
-                # 重置车辆状态
+                # Reset vehicle status
                 status['status'] = 'idle'
                 status['current_task'] = None
                 self.env.vehicles[vehicle_id]['status'] = 'idle'
                 
-                # 释放交通管理器中的路径
+                # Release path in traffic manager
                 if self.traffic_manager:
                     self.traffic_manager.release_vehicle_path(vehicle_id)
                 
-                self.log(f"已取消车辆 {vehicle_id} 的所有任务", "success")
+                self.log(f"Cancelled all tasks for vehicle {vehicle_id}", "success")
             else:
-                self.log(f"车辆 {vehicle_id} 没有活动任务", "warning")
+                self.log(f"Vehicle {vehicle_id} has no active tasks", "warning")
     
     def goto_loading_point(self):
-        """命令当前选中车辆前往装载点"""
+        """Command current vehicle to go to loading point"""
         if not self.vehicle_scheduler or not self.env.loading_points:
             return
         
-        # 获取选中的车辆
+        # Get selected vehicle
         index = self.vehicle_combo.currentIndex()
         if index < 0:
-            self.log("请先选择车辆", "warning")
+            self.log("Please select a vehicle first", "warning")
             return
         
         vehicle_id = self.vehicle_combo.itemData(index)
         
-        # 选择一个装载点
+        # Select a loading point
         loading_point = self.env.loading_points[0]
         
-        # 创建任务
+        # Create task
         task_id = f"task_{self.vehicle_scheduler.task_counter}"
         self.vehicle_scheduler.task_counter += 1
         
@@ -1639,36 +1772,36 @@ class MineGUI(QMainWindow):
             1
         )
         
-        # 添加到任务字典
+        # Add to task dictionary
         self.vehicle_scheduler.tasks[task_id] = task
         
-        # 清空并添加到车辆任务队列
+        # Clear and add to vehicle task queue
         self.vehicle_scheduler.task_queues[vehicle_id] = [task_id]
         
-        # 如果车辆空闲，立即开始执行任务
+        # If vehicle is idle, start task immediately
         status = self.vehicle_scheduler.vehicle_statuses[vehicle_id]
         if status['status'] == 'idle':
             self.vehicle_scheduler._start_next_task(vehicle_id)
         
-        self.log(f"已命令车辆 {vehicle_id} 前往装载点", "success")
+        self.log(f"Commanded vehicle {vehicle_id} to go to loading point", "success")
     
     def goto_unloading_point(self):
-        """命令当前选中车辆前往卸载点"""
+        """Command current vehicle to go to unloading point"""
         if not self.vehicle_scheduler or not self.env.unloading_points:
             return
         
-        # 获取选中的车辆
+        # Get selected vehicle
         index = self.vehicle_combo.currentIndex()
         if index < 0:
-            self.log("请先选择车辆", "warning")
+            self.log("Please select a vehicle first", "warning")
             return
         
         vehicle_id = self.vehicle_combo.itemData(index)
         
-        # 选择一个卸载点
+        # Select an unloading point
         unloading_point = self.env.unloading_points[0]
         
-        # 创建任务
+        # Create task
         task_id = f"task_{self.vehicle_scheduler.task_counter}"
         self.vehicle_scheduler.task_counter += 1
         
@@ -1682,33 +1815,33 @@ class MineGUI(QMainWindow):
             1
         )
         
-        # 添加到任务字典
+        # Add to task dictionary
         self.vehicle_scheduler.tasks[task_id] = task
         
-        # 清空并添加到车辆任务队列
+        # Clear and add to vehicle task queue
         self.vehicle_scheduler.task_queues[vehicle_id] = [task_id]
         
-        # 如果车辆空闲，立即开始执行任务
+        # If vehicle is idle, start task immediately
         status = self.vehicle_scheduler.vehicle_statuses[vehicle_id]
         if status['status'] == 'idle':
             self.vehicle_scheduler._start_next_task(vehicle_id)
         
-        self.log(f"已命令车辆 {vehicle_id} 前往卸载点", "success")
+        self.log(f"Commanded vehicle {vehicle_id} to go to unloading point", "success")
     
     def return_to_start(self):
-        """命令当前选中车辆返回起点"""
+        """Command current vehicle to return to start point"""
         if not self.vehicle_scheduler:
             return
         
-        # 获取选中的车辆
+        # Get selected vehicle
         index = self.vehicle_combo.currentIndex()
         if index < 0:
-            self.log("请先选择车辆", "warning")
+            self.log("Please select a vehicle first", "warning")
             return
         
         vehicle_id = self.vehicle_combo.itemData(index)
         
-        # 获取车辆初始位置
+        # Get vehicle initial position
         if vehicle_id not in self.env.vehicles:
             return
         
@@ -1716,10 +1849,10 @@ class MineGUI(QMainWindow):
         initial_position = vehicle.get('initial_position')
         
         if not initial_position:
-            self.log(f"车辆 {vehicle_id} 没有初始位置", "error")
+            self.log(f"Vehicle {vehicle_id} has no initial position", "error")
             return
         
-        # 创建任务
+        # Create task
         task_id = f"task_{self.vehicle_scheduler.task_counter}"
         self.vehicle_scheduler.task_counter += 1
         
@@ -1733,156 +1866,222 @@ class MineGUI(QMainWindow):
             1
         )
         
-        # 添加到任务字典
+        # Add to task dictionary
         self.vehicle_scheduler.tasks[task_id] = task
         
-        # 清空并添加到车辆任务队列
+        # Clear and add to vehicle task queue
         self.vehicle_scheduler.task_queues[vehicle_id] = [task_id]
         
-        # 如果车辆空闲，立即开始执行任务
+        # If vehicle is idle, start task immediately
         status = self.vehicle_scheduler.vehicle_statuses[vehicle_id]
         if status['status'] == 'idle':
             self.vehicle_scheduler._start_next_task(vehicle_id)
         
-        self.log(f"已命令车辆 {vehicle_id} 返回起点", "success")
+        self.log(f"Commanded vehicle {vehicle_id} to return to start point", "success")
     
-    # 任务操作方法
+    # Task operation methods
     def create_task_template(self):
-        """创建任务模板"""
+        """Create task template"""
         if not self.vehicle_scheduler or not self.env.loading_points or not self.env.unloading_points:
-            self.log("环境未初始化或缺少装载点/卸载点", "error")
+            self.log("Environment not initialized or missing loading/unloading points", "error")
             return
         
-        # 创建默认模板
-        if self.vehicle_scheduler.create_mission_template("default"):
-            self.log("已创建默认任务模板", "success")
+        # Create default template
+        if isinstance(self.vehicle_scheduler, ECBSVehicleScheduler):
+            if self.vehicle_scheduler.create_ecbs_mission_template("default"):
+                self.log("Created default task template with ECBS support", "success")
+            else:
+                self.log("Failed to create task template", "error")
         else:
-            self.log("创建任务模板失败", "error")
+            if self.vehicle_scheduler.create_mission_template("default"):
+                self.log("Created default task template", "success")
+            else:
+                self.log("Failed to create task template", "error")
     
     def auto_assign_tasks(self):
-        """自动为所有车辆分配任务"""
+        """Auto-assign tasks to all vehicles using ECBS batch planning"""
         if not self.vehicle_scheduler:
-            self.log("车辆调度器未初始化", "error")
+            self.log("Vehicle scheduler not initialized", "error")
             return
         
-        # 确保有任务模板
+        # Ensure we have a task template
         if "default" not in self.vehicle_scheduler.mission_templates:
             self.create_task_template()
         
-        # 为所有车辆分配任务
-        success_count = 0
-        for vehicle_id in self.env.vehicles.keys():
-            if self.vehicle_scheduler.assign_mission(vehicle_id, "default"):
-                success_count += 1
-        
-        self.log(f"已为 {success_count}/{len(self.env.vehicles)} 辆车分配任务", "success")
+        # For ECBSVehicleScheduler, use batch assignment for better coordination
+        if isinstance(self.vehicle_scheduler, ECBSVehicleScheduler):
+            # Prepare batch of vehicles for ECBS coordination
+            vehicle_ids = list(self.env.vehicles.keys())
+            
+            self.log(f"Planning coordinated paths for {len(vehicle_ids)} vehicles using ECBS...")
+            
+            # Collect tasks for all vehicles
+            tasks = []
+            for vehicle_id in vehicle_ids:
+                # Create tasks from template
+                template = self.vehicle_scheduler.mission_templates["default"]
+                vehicle_pos = self.env.vehicles[vehicle_id]['position']
+                
+                for task_template in template:
+                    task = VehicleTask(
+                        f"task_{self.vehicle_scheduler.task_counter}",
+                        task_template['task_type'],
+                        vehicle_pos,
+                        task_template['goal'] if task_template['goal'] else vehicle_pos,
+                        task_template['priority']
+                    )
+                    self.vehicle_scheduler.task_counter += 1
+                    tasks.append(task)
+                    vehicle_pos = task.goal  # Update for next task
+            
+            # Use ECBS batch assignment
+            assignments = self.vehicle_scheduler.assign_tasks_batch(tasks)
+            self.log(f"ECBS batch assignment completed with {len(assignments)} assignments")
+        else:
+            # Fallback to simple assignment
+            success_count = 0
+            for vehicle_id in self.env.vehicles.keys():
+                if self.vehicle_scheduler.assign_mission(vehicle_id, "default"):
+                    success_count += 1
+            
+            self.log(f"Assigned tasks to {success_count}/{len(self.env.vehicles)} vehicles", "success")
     
-    # 显示选项控制
+    def refresh_conflict_data(self):
+        """Refresh ECBS conflict data display"""
+        if not self.traffic_manager or not hasattr(self.traffic_manager, 'detect_conflicts'):
+            self.log("Traffic manager not available", "warning")
+            return
+        
+        # Collect active paths
+        active_paths = {}
+        for vehicle_id, vehicle in self.env.vehicles.items():
+            if 'path' in vehicle and vehicle['path']:
+                active_paths[vehicle_id] = vehicle['path']
+        
+        # Detect conflicts
+        if active_paths and len(active_paths) > 1:
+            conflicts = self.traffic_manager.detect_conflicts(active_paths)
+            
+            # Update conflict table
+            self.conflict_table.setRowCount(len(conflicts))
+            
+            for i, conflict in enumerate(conflicts):
+                self.conflict_table.setItem(i, 0, QTableWidgetItem(str(conflict.agent1)))
+                self.conflict_table.setItem(i, 1, QTableWidgetItem(str(conflict.agent2)))
+                self.conflict_table.setItem(i, 2, QTableWidgetItem(conflict.conflict_type))
+            
+            self.log(f"Found {len(conflicts)} potential conflicts", "warning")
+        else:
+            self.conflict_table.setRowCount(0)
+            self.log("No active paths to check for conflicts", "info")
+    
+    # Display update methods
     def update_path_display(self):
-        """更新路径显示选项"""
+        """Update path display options"""
         if not hasattr(self, 'backbone_visualizer') or not self.backbone_visualizer:
             return
         
-        # 显示/隐藏主干路径
+        # Show/hide backbone paths
         self.backbone_visualizer.setVisible(self.show_paths_cb.isChecked())
         
-        # TODO: 实现连接点和交通流量的显示控制
+        # TODO: Implement connection point and traffic flow display controls
     
     def update_vehicle_display(self):
-        """更新车辆显示选项"""
+        """Update vehicle display options"""
         if not hasattr(self, 'vehicle_items'):
             return
         
-        # 显示/隐藏所有车辆
+        # Show/hide all vehicles
         show_vehicles = self.show_vehicles_cb.isChecked()
         
         for vehicle_id, items in self.vehicle_items.items():
             items['polygon'].setVisible(show_vehicles)
             
-            # 根据标签选项显示/隐藏标签
+            # Show/hide labels based on option
             items['label'].setVisible(show_vehicles and self.show_vehicle_labels_cb.isChecked())
         
-        # TODO: 实现车辆路径的显示控制
+        # TODO: Implement vehicle path display control
     
     def toggle_edit_mode(self, checked):
-        """切换编辑模式"""
+        """Toggle edit mode"""
         self.add_path_button.setEnabled(checked)
         self.delete_path_button.setEnabled(checked)
         
-        # TODO: 实现编辑模式的功能
+        # TODO: Implement edit mode functionality
+        self.log("Edit mode " + ("enabled" if checked else "disabled"))
     
     def start_add_path(self):
-        """开始添加路径"""
-        # TODO: 实现添加路径功能
-        self.log("添加路径功能尚未实现", "warning")
+        """Start adding path"""
+        # TODO: Implement add path functionality
+        self.log("Add path functionality not yet implemented", "warning")
     
     def start_delete_path(self):
-        """开始删除路径"""
-        # TODO: 实现删除路径功能
-        self.log("删除路径功能尚未实现", "warning")
+        """Start deleting path"""
+        # TODO: Implement delete path functionality
+        self.log("Delete path functionality not yet implemented", "warning")
     
     def toggle_backbone_display(self, checked):
-        """切换主干路径显示"""
+        """Toggle backbone path display"""
         if hasattr(self, 'backbone_visualizer') and self.backbone_visualizer:
             self.backbone_visualizer.setVisible(checked)
             
-            # 同步复选框状态
+            # Sync checkbox state
             self.show_paths_cb.setChecked(checked)
     
     def toggle_vehicles_display(self, checked):
-        """切换车辆显示"""
+        """Toggle vehicle display"""
         if hasattr(self, 'vehicle_items'):
             for vehicle_id, items in self.vehicle_items.items():
                 items['polygon'].setVisible(checked)
                 items['label'].setVisible(checked and self.show_vehicle_labels_cb.isChecked())
             
-            # 同步复选框状态
+            # Sync checkbox state
             self.show_vehicles_cb.setChecked(checked)
     
     def optimize_paths(self):
-        """优化路径"""
+        """Optimize paths"""
         if not self.backbone_network or not self.backbone_network.paths:
-            self.log("请先生成主干路径网络", "warning")
+            self.log("Please generate backbone path network first", "warning")
             return
         
         try:
-            self.log("正在优化路径...")
+            self.log("Optimizing paths...")
             
-            # 重新优化所有路径
+            # Re-optimize all paths
             self.backbone_network._optimize_all_paths()
             
-            # 更新路径信息
+            # Update path information
             self.update_path_info()
             
-            # 重新绘制主干网络
+            # Redraw backbone network
             self.draw_backbone_network()
             
-            self.log("路径优化完成", "success")
+            self.log("Path optimization complete", "success")
             
         except Exception as e:
-            self.log(f"路径优化失败: {str(e)}", "error")
+            self.log(f"Path optimization failed: {str(e)}", "error")
     
     def save_results(self):
-        """保存结果"""
+        """Save results"""
         if not self.env:
-            self.log("没有可保存的结果", "warning")
+            self.log("No results to save", "warning")
             return
         
-        # 打开保存对话框
+        # Open save dialog
         file_path, selected_filter = QFileDialog.getSaveFileName(
             self,
-            "保存结果",
+            "Save Results",
             f"simulation_result_{time.strftime('%Y%m%d_%H%M%S')}",
-            "PNG图像 (*.png);;JSON数据 (*.json);;所有文件 (*)"
+            "PNG Image (*.png);;JSON Data (*.json);;All Files (*)"
         )
         
         if not file_path:
             return
         
         try:
-            # 根据文件类型保存不同格式
+            # Save different formats based on file type
             if file_path.endswith('.png'):
-                # 保存场景截图
+                # Save scene screenshot
                 pixmap = QPixmap(self.graphics_view.viewport().size())
                 pixmap.fill(Qt.white)
                 
@@ -1891,19 +2090,19 @@ class MineGUI(QMainWindow):
                 painter.end()
                 
                 if pixmap.save(file_path):
-                    self.log(f"截图已保存到: {file_path}", "success")
+                    self.log(f"Screenshot saved to: {file_path}", "success")
                 else:
-                    self.log("保存截图失败", "error")
+                    self.log("Failed to save screenshot", "error")
                 
             elif file_path.endswith('.json'):
-                # 保存模拟数据
+                # Save simulation data
                 data = {
                     'time': self.env.current_time if hasattr(self.env, 'current_time') else 0,
                     'vehicles': {},
                     'tasks': {}
                 }
                 
-                # 添加车辆数据
+                # Add vehicle data
                 for vehicle_id, vehicle in self.env.vehicles.items():
                     data['vehicles'][vehicle_id] = {
                         'position': vehicle.get('position'),
@@ -1912,37 +2111,122 @@ class MineGUI(QMainWindow):
                         'completed_cycles': vehicle.get('completed_cycles', 0)
                     }
                 
-                # 添加任务数据
+                # Add task data
                 if self.vehicle_scheduler:
                     for task_id, task in self.vehicle_scheduler.tasks.items():
                         data['tasks'][task_id] = task.to_dict()
                 
-                # 保存为JSON
+                # Save as JSON
                 with open(file_path, 'w') as f:
                     json.dump(data, f, indent=2)
                 
-                self.log(f"模拟数据已保存到: {file_path}", "success")
+                self.log(f"Simulation data saved to: {file_path}", "success")
             
             else:
-                self.log("未知的文件格式", "error")
+                self.log("Unknown file format", "error")
         
         except Exception as e:
-            self.log(f"保存结果失败: {str(e)}", "error")
+            self.log(f"Failed to save results: {str(e)}", "error")
     
     def show_about(self):
-        """显示关于对话框"""
+        """Show about dialog"""
         about_text = """
         <div style="text-align:center;">
-            <h2>露天矿多车协同调度系统</h2>
-            <p>基于主干路径的多车辆协同规划与调度</p>
-            <p>版本: 1.0</p>
+            <h2>Open Pit Mine Multi-Vehicle Coordination System</h2>
+            <p>Backbone Path Network-based Multi-Vehicle Planning and Scheduling</p>
+            <p>Version: 1.0</p>
             <hr>
-            <p>采用主干路径网络优化露天矿车辆调度效率</p>
-            <p>支持多车辆协同、冲突避免和交通管理</p>
+            <p>Uses backbone path network to optimize mine vehicle scheduling efficiency</p>
+            <p>Supports multi-vehicle coordination, conflict avoidance, and traffic management</p>
             <hr>
-            <p>开发者: XXX</p>
+            <p>Developer: XXX</p>
             <p>Copyright © 2023</p>
         </div>
         """
         
-        QMessageBox.about(self, "关于", about_text)
+        QMessageBox.about(self, "About", about_text)
+    
+    def update_ecbs_params(self):
+        """Update ECBS parameter display"""
+        # Update suboptimality bound display
+        subopt = self.subopt_slider.value() / 10.0
+        self.subopt_value.setText(f"{subopt:.1f}")
+    
+    def apply_ecbs_settings(self):
+        """Apply ECBS settings to the traffic manager"""
+        if not self.traffic_manager:
+            self.log("Traffic manager not available", "warning")
+            return
+        
+        # Get suboptimality bound
+        subopt = self.subopt_slider.value() / 10.0
+        
+        # Get conflict resolution strategy
+        strategy = self.strategy_combo.currentText().lower()
+        
+        # Apply settings
+        if hasattr(self.traffic_manager, 'suboptimality_bound'):
+            self.traffic_manager.suboptimality_bound = subopt
+        
+        # Apply to vehicle scheduler if it's an ECBSVehicleScheduler
+        if isinstance(self.vehicle_scheduler, ECBSVehicleScheduler):
+            if hasattr(self.vehicle_scheduler, 'conflict_resolution_strategy'):
+                self.vehicle_scheduler.conflict_resolution_strategy = strategy
+        
+        self.log(f"Applied ECBS settings: bound={subopt}, strategy={strategy}", "success")
+    
+    def set_up_integrated_system(self):
+        """Set up the complete integrated system with ECBS"""
+        # Create the environment
+        env = OpenPitMineEnv(width=500, height=500)
+        
+        # Create the path planner with the environment
+        path_planner = PathPlanner(env)
+        
+        # Create the backbone network
+        backbone_network = BackbonePathNetwork(env)
+        backbone_network.generate_network()
+        
+        # Set the backbone network to the path planner
+        path_planner.set_backbone_network(backbone_network)
+        
+        # Create the ECBS traffic manager
+        traffic_manager = TrafficManager(env, backbone_network)
+        
+        # Create the ECBS-enhanced vehicle scheduler
+        scheduler = ECBSVehicleScheduler(env, path_planner, traffic_manager)
+        
+        # Initialize all components
+        scheduler.initialize_vehicles()
+        
+        # Create mission templates
+        scheduler.create_ecbs_mission_template("standard_cycle")
+        
+        # Assign missions to vehicles
+        for vehicle_id in env.vehicles.keys():
+            scheduler.assign_mission(vehicle_id, "standard_cycle")
+        
+        # Save references
+        self.env = env
+        self.path_planner = path_planner
+        self.backbone_network = backbone_network
+        self.traffic_manager = traffic_manager
+        self.vehicle_scheduler = scheduler
+        
+        # Start the simulation
+        self.start_simulation()
+        
+        self.log("Full integrated system with ECBS initialized and running", "success")
+
+
+if __name__ == "__main__":
+    app = QApplication(sys.argv)
+    
+    # Set application style
+    app.setStyle("Fusion")
+    
+    # Create and show main window
+    window = MineGUI()
+    window.show()
+    
+    sys.exit(app.exec_())
