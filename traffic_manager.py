@@ -1,7 +1,535 @@
+import math
+import heapq
+from typing import List, Dict, Tuple, Set, Optional, Any
+
+class Conflict:
+    """表示两个车辆之间的路径冲突"""
+    
+    def __init__(self, agent1, agent2, location=None, time_step=None, conflict_type="path"):
+        """
+        初始化冲突对象
+        
+        Args:
+            agent1: 第一个车辆ID
+            agent2: 第二个车辆ID
+            location: 冲突位置坐标
+            time_step: 冲突时间
+            conflict_type: 冲突类型，可以是"path", "connection", "vertex", "edge"等
+        """
+        self.agent1 = agent1
+        self.agent2 = agent2
+        self.location = location
+        self.time_step = time_step
+        self.conflict_type = conflict_type
+    
+    def __str__(self):
+        return f"Conflict({self.conflict_type}): {self.agent1} vs {self.agent2} at {self.location}, time={self.time_step}"
+
+
+class Constraint:
+    """表示ECBS中的约束条件，限制车辆在特定时间不能在特定位置"""
+    
+    def __init__(self, agent_id, location=None, time_step=None, constraint_type="vertex"):
+        """
+        初始化约束条件
+        
+        Args:
+            agent_id: 适用的车辆ID
+            location: 受约束的位置
+            time_step: 约束时间
+            constraint_type: 约束类型，可以是"vertex"(点约束)或"edge"(边约束)
+        """
+        self.agent_id = agent_id
+        self.location = location
+        self.time_step = time_step
+        self.constraint_type = constraint_type
+    
+    def __str__(self):
+        return f"Constraint({self.constraint_type}): Agent {self.agent_id} can't be at {self.location} at time {self.time_step}"
+
+
+class ConstraintTreeNode:
+    """ECBS约束树节点，表示一组约束下的解决方案"""
+    
+    def __init__(self, constraints=None, solution=None, cost=0, conflicts=None, parent=None):
+        """
+        初始化约束树节点
+        
+        Args:
+            constraints: 约束列表
+            solution: 解决方案（车辆路径字典）
+            cost: 解决方案总成本
+            conflicts: 解决方案中的冲突列表
+            parent: 父节点
+        """
+        self.constraints = constraints or []
+        self.solution = solution or {}
+        self.cost = cost
+        self.conflicts = conflicts or []
+        self.parent = parent
+        
+        # 节点评估值 - 用于优先队列
+        self.conflict_count = len(self.conflicts)
+    
+    def __lt__(self, other):
+        """比较运算符，用于优先队列排序"""
+        # 首先比较成本
+        if self.cost != other.cost:
+            return self.cost < other.cost
+        # 如果成本相同，比较冲突数
+        return self.conflict_count < other.conflict_count
+
+
+class SafetyRectangle:
+    """表示车辆安全区域的矩形"""
+    
+    def __init__(self, length=6.0, width=3.0, margin=0.5):
+        """
+        初始化安全矩形
+        
+        Args:
+            length: 车辆长度
+            width: 车辆宽度
+            margin: 安全边距
+        """
+        self.length = length
+        self.width = width
+        self.margin = margin
+        
+        # 计算扩展尺寸（包含安全边距）
+        self.extended_length = length + 2 * margin
+        self.extended_width = width + 2 * margin
+        
+        # 对角线长度（用于快速冲突检测）
+        self.diagonal = math.sqrt(self.extended_length**2 + self.extended_width**2)
+
+
+class PathConflictDetector:
+    """路径冲突检测器"""
+    
+    def __init__(self, safety_rectangle):
+        """
+        初始化路径冲突检测器
+        
+        Args:
+            safety_rectangle: 安全矩形对象
+        """
+        self.safety_rectangle = safety_rectangle
+    
+    def check_path_conflict(self, agent1, path1, agent2, path2):
+        """
+        检查两条路径是否有冲突
+        
+        Args:
+            agent1: 第一个车辆ID
+            path1: 第一个车辆的路径
+            agent2: 第二个车辆ID
+            path2: 第二个车辆的路径
+            
+        Returns:
+            Conflict or None: 如果有冲突返回冲突对象，否则返回None
+        """
+        # 如果路径为空，无冲突
+        if not path1 or not path2:
+            return None
+        
+        # 顶点冲突检测 - 两车同时在相同或接近的位置
+        conflict = self._check_vertex_conflicts(agent1, path1, agent2, path2)
+        if conflict:
+            return conflict
+        
+        # 边冲突检测 - 两车在相同时间段内穿过同一区域
+        conflict = self._check_edge_conflicts(agent1, path1, agent2, path2)
+        if conflict:
+            return conflict
+        
+        # 追逐冲突检测 - 两车沿着同一路径但可能发生追尾
+        conflict = self._check_following_conflicts(agent1, path1, agent2, path2)
+        if conflict:
+            return conflict
+        
+        return None
+    
+    def _check_vertex_conflicts(self, agent1, path1, agent2, path2):
+        """检查顶点冲突 - 两车同时在相同位置"""
+        min_path_len = min(len(path1), len(path2))
+        
+        # 假设路径点索引对应时间步
+        for t in range(min_path_len):
+            p1 = path1[t]
+            p2 = path2[t]
+            
+            # 计算两点之间的距离
+            dist = math.sqrt((p1[0] - p2[0])**2 + (p1[1] - p2[1])**2)
+            
+            # 如果距离小于安全距离，则有冲突
+            if dist < self.safety_rectangle.diagonal / 2:
+                return Conflict(
+                    agent1=agent1,
+                    agent2=agent2,
+                    location=((p1[0] + p2[0])/2, (p1[1] + p2[1])/2),
+                    time_step=t,
+                    conflict_type="vertex"
+                )
+        
+        return None
+    
+    def _check_edge_conflicts(self, agent1, path1, agent2, path2):
+        """检查边冲突 - 两车在相邻时间步交叉"""
+        min_path_len = min(len(path1), len(path2)) - 1
+        
+        for t in range(min_path_len):
+            a1_from = path1[t]
+            a1_to = path1[t+1]
+            a2_from = path2[t]
+            a2_to = path2[t+1]
+            
+            # 检查两线段是否相交
+            if self._segments_intersect(a1_from, a1_to, a2_from, a2_to):
+                # 计算交点
+                intersection = self._compute_intersection(a1_from, a1_to, a2_from, a2_to)
+                
+                return Conflict(
+                    agent1=agent1,
+                    agent2=agent2,
+                    location=intersection,
+                    time_step=t + 0.5,  # 交叉发生在中间时间
+                    conflict_type="edge"
+                )
+        
+        return None
+    
+    def _check_following_conflicts(self, agent1, path1, agent2, path2):
+        """检查追逐冲突 - 两车沿着相同路径但可能追尾"""
+        # 检查是否在同一路径上
+        path1_segments = self._extract_path_segments(path1)
+        path2_segments = self._extract_path_segments(path2)
+        
+        # 查找共同的路径段
+        common_segments = set(path1_segments) & set(path2_segments)
+        
+        # 如果没有共同路径段，则无追逐冲突
+        if not common_segments:
+            return None
+        
+        # 对于每个共同路径段，计算时间差异
+        for segment in common_segments:
+            # 找出各自进入该路径段的时间
+            t1 = next((i for i, s in enumerate(path1_segments) if s == segment), -1)
+            t2 = next((i for i, s in enumerate(path2_segments) if s == segment), -1)
+            
+            if t1 != -1 and t2 != -1:
+                # 计算时间差
+                time_diff = abs(t1 - t2)
+                
+                # 如果时间差太小，有追逐冲突风险
+                if time_diff < 3:  # 时间差阈值
+                    # 确定哪个车辆在前面
+                    if t1 < t2:
+                        front_agent, back_agent = agent1, agent2
+                        front_time, back_time = t1, t2
+                    else:
+                        front_agent, back_agent = agent2, agent1
+                        front_time, back_time = t2, t1
+                    
+                    # 创建追逐冲突
+                    return Conflict(
+                        agent1=front_agent,
+                        agent2=back_agent,
+                        location=segment,
+                        time_step=(front_time + back_time)/2,
+                        conflict_type="following"
+                    )
+        
+        return None
+    
+    def _segments_intersect(self, p1, p2, p3, p4):
+        """判断两条线段是否相交"""
+        # 简化为2D问题
+        p1_2d = (p1[0], p1[1])
+        p2_2d = (p2[0], p2[1])
+        p3_2d = (p3[0], p3[1])
+        p4_2d = (p4[0], p4[1])
+        
+        # 计算方向
+        d1 = self._direction(p3_2d, p4_2d, p1_2d)
+        d2 = self._direction(p3_2d, p4_2d, p2_2d)
+        d3 = self._direction(p1_2d, p2_2d, p3_2d)
+        d4 = self._direction(p1_2d, p2_2d, p4_2d)
+        
+        # 如果两线段相交，必须方向交替
+        return ((d1 > 0 and d2 < 0) or (d1 < 0 and d2 > 0)) and \
+               ((d3 > 0 and d4 < 0) or (d3 < 0 and d4 > 0))
+    
+    def _direction(self, p1, p2, p3):
+        """计算向量叉积，判断p3相对于从p1到p2的方向"""
+        return (p2[0] - p1[0]) * (p3[1] - p1[1]) - (p3[0] - p1[0]) * (p2[1] - p1[1])
+    
+    def _compute_intersection(self, p1, p2, p3, p4):
+        """计算两条线段的交点"""
+        # 简化为2D问题
+        x1, y1 = p1[0], p1[1]
+        x2, y2 = p2[0], p2[1]
+        x3, y3 = p3[0], p3[1]
+        x4, y4 = p4[0], p4[1]
+        
+        # 计算交点公式
+        denominator = (y4-y3)*(x2-x1) - (x4-x3)*(y2-y1)
+        
+        # 如果分母为0，线段平行
+        if abs(denominator) < 1e-10:
+            # 返回中点作为近似
+            return ((x1+x2+x3+x4)/4, (y1+y2+y3+y4)/4)
+        
+        # 计算交点坐标
+        ua = ((x4-x3)*(y1-y3) - (y4-y3)*(x1-x3)) / denominator
+        
+        x = x1 + ua * (x2-x1)
+        y = y1 + ua * (y2-y1)
+        
+        return (x, y)
+    
+    def _extract_path_segments(self, path):
+        """从路径提取线段，用于追逐冲突检测"""
+        segments = []
+        
+        for i in range(len(path) - 1):
+            # 创建线段表示（简化为起点和终点）
+            segment = (
+                (round(path[i][0], 1), round(path[i][1], 1)),
+                (round(path[i+1][0], 1), round(path[i+1][1], 1))
+            )
+            segments.append(segment)
+        
+        return segments
+
+
+class SpaceTimeReservationTable:
+    """时空预留表，记录路径时空占用情况"""
+    
+    def __init__(self):
+        """初始化时空预留表"""
+        self.reservations = {}  # 格式: {(x, y, t): [agent_ids]}
+        
+        # 用于高效查询的空间哈希表
+        self.location_reservation = {}  # 格式: {(x, y): {t: [agent_ids]}}
+        self.agent_reservation = {}  # 格式: {agent_id: [(x, y, t)]}
+    
+    def add_reservation(self, agent_id, location, time_step):
+        """
+        添加预留
+        
+        Args:
+            agent_id: 车辆ID
+            location: 位置坐标 (x, y)
+            time_step: 时间步
+            
+        Returns:
+            bool: 添加是否成功
+        """
+        # 对位置和时间进行离散化
+        x, y = round(location[0], 1), round(location[1], 1)
+        t = round(time_step, 1)
+        
+        key = (x, y, t)
+        
+        # 初始化预留列表（如果不存在）
+        if key not in self.reservations:
+            self.reservations[key] = []
+        
+        # 添加预留
+        self.reservations[key].append(agent_id)
+        
+        # 更新位置预留映射
+        location_key = (x, y)
+        if location_key not in self.location_reservation:
+            self.location_reservation[location_key] = {}
+        if t not in self.location_reservation[location_key]:
+            self.location_reservation[location_key][t] = []
+        self.location_reservation[location_key][t].append(agent_id)
+        
+        # 更新车辆预留映射
+        if agent_id not in self.agent_reservation:
+            self.agent_reservation[agent_id] = []
+        self.agent_reservation[agent_id].append(key)
+        
+        return True
+    
+    def remove_reservation(self, agent_id, location=None, time_step=None):
+        """
+        移除预留
+        
+        Args:
+            agent_id: 车辆ID
+            location: 位置坐标 (可选)
+            time_step: 时间步 (可选)
+            
+        Returns:
+            int: 移除的预留数量
+        """
+        removed_count = 0
+        
+        # 如果提供了位置和时间，只移除特定的预留
+        if location is not None and time_step is not None:
+            x, y = round(location[0], 1), round(location[1], 1)
+            t = round(time_step, 1)
+            key = (x, y, t)
+            
+            if key in self.reservations and agent_id in self.reservations[key]:
+                self.reservations[key].remove(agent_id)
+                removed_count += 1
+                
+                # 更新位置预留映射
+                location_key = (x, y)
+                if location_key in self.location_reservation and t in self.location_reservation[location_key]:
+                    if agent_id in self.location_reservation[location_key][t]:
+                        self.location_reservation[location_key][t].remove(agent_id)
+                
+                # 更新车辆预留映射
+                if agent_id in self.agent_reservation and key in self.agent_reservation[agent_id]:
+                    self.agent_reservation[agent_id].remove(key)
+        else:
+            # 如果没有提供位置和时间，移除该车辆的所有预留
+            if agent_id in self.agent_reservation:
+                for key in self.agent_reservation[agent_id]:
+                    x, y, t = key
+                    if key in self.reservations and agent_id in self.reservations[key]:
+                        self.reservations[key].remove(agent_id)
+                        removed_count += 1
+                    
+                    # 更新位置预留映射
+                    location_key = (x, y)
+                    if location_key in self.location_reservation and t in self.location_reservation[location_key]:
+                        if agent_id in self.location_reservation[location_key][t]:
+                            self.location_reservation[location_key][t].remove(agent_id)
+                
+                # 清空车辆预留列表
+                self.agent_reservation[agent_id] = []
+        
+        return removed_count
+    
+    def check_reservation(self, location, time_step):
+        """
+        检查位置和时间是否已被预留
+        
+        Args:
+            location: 位置坐标 (x, y)
+            time_step: 时间步
+            
+        Returns:
+            list: 已预留的车辆ID列表
+        """
+        x, y = round(location[0], 1), round(location[1], 1)
+        t = round(time_step, 1)
+        
+        key = (x, y, t)
+        
+        return self.reservations.get(key, []).copy()
+    
+    def check_path_reservation(self, path, start_time=0, speed=1.0):
+        """
+        检查路径是否与现有预留冲突
+        
+        Args:
+            path: 路径点列表
+            start_time: 开始时间
+            speed: 速度
+            
+        Returns:
+            list: 冲突信息列表，每项包含 (location, time_step, agent_ids)
+        """
+        conflicts = []
+        
+        current_time = start_time
+        
+        for i in range(len(path) - 1):
+            # 计算段长度
+            p1 = path[i]
+            p2 = path[i + 1]
+            segment_length = math.sqrt((p2[0] - p1[0])**2 + (p2[1] - p1[1])**2)
+            
+            # 计算该段所需时间
+            segment_time = segment_length / speed
+            
+            # 检查沿路径的多个点
+            num_checks = max(1, int(segment_length / 0.5))  # 每0.5个单位检查一次
+            
+            for j in range(num_checks + 1):
+                ratio = j / num_checks
+                
+                # 计算检查点
+                x = p1[0] + ratio * (p2[0] - p1[0])
+                y = p1[1] + ratio * (p2[1] - p1[1])
+                t = current_time + ratio * segment_time
+                
+                # 检查该点是否有预留
+                agents = self.check_reservation((x, y), t)
+                
+                if agents:
+                    conflicts.append(((x, y), t, agents))
+            
+            # 更新时间
+            current_time += segment_time
+        
+        return conflicts
+    
+    def reserve_path(self, agent_id, path, start_time=0, speed=1.0):
+        """
+        为路径添加预留
+        
+        Args:
+            agent_id: 车辆ID
+            path: 路径点列表
+            start_time: 开始时间
+            speed: 速度
+            
+        Returns:
+            int: 添加的预留数量
+        """
+        reservation_count = 0
+        current_time = start_time
+        
+        for i in range(len(path) - 1):
+            # 计算段长度
+            p1 = path[i]
+            p2 = path[i + 1]
+            segment_length = math.sqrt((p2[0] - p1[0])**2 + (p2[1] - p1[1])**2)
+            
+            # 计算该段所需时间
+            segment_time = segment_length / speed
+            
+            # 在路径沿途添加预留
+            num_reservations = max(1, int(segment_length / 0.5))  # 每0.5个单位添加一个预留
+            
+            for j in range(num_reservations + 1):
+                ratio = j / num_reservations
+                
+                # 计算预留点
+                x = p1[0] + ratio * (p2[0] - p1[0])
+                y = p1[1] + ratio * (p2[1] - p1[1])
+                t = current_time + ratio * segment_time
+                
+                # 添加预留
+                self.add_reservation(agent_id, (x, y), t)
+                reservation_count += 1
+            
+            # 更新时间
+            current_time += segment_time
+        
+        return reservation_count
+
+
 class TrafficManager:
     """交通管理器，处理车辆流量和冲突"""
     
     def __init__(self, env, backbone_network=None):
+        """
+        初始化交通管理器
+        
+        Args:
+            env: 环境对象
+            backbone_network: 主干路径网络，可选
+        """
         self.env = env
         self.backbone_network = backbone_network
         self.vehicle_reservations = {}  # 路径占用情况 {path_id: {time: [vehicle_ids]}}
@@ -16,8 +544,26 @@ class TrafficManager:
             'path_lanes': {}  # 路径车道数 {path_id: lanes}
         }
         
+        # ECBS参数
+        self.suboptimality_bound = 1.5  # ECBS次优界限参数
+        
+        # 约束树管理
+        self.constraint_tree = None
+        self.open_list = []  # 按成本排序的节点优先队列
+        self.focal_list = []  # 按冲突排序的低冲突解决方案
+        
+        # 冲突检测组件
+        self.safety_rectangle = SafetyRectangle(
+            length=6.0,   # 车辆长度
+            width=3.0,    # 车辆宽度
+            margin=0.5    # 安全边距
+        )
+        self.conflict_detector = PathConflictDetector(self.safety_rectangle)
+        
+        # 路径预留系统
+        self.reservation_table = SpaceTimeReservationTable()
+        
         # 冲突检测参数
-        self.conflict_detector = None
         self.has_conflict = False
     
     def set_backbone_network(self, backbone_network):
@@ -58,7 +604,7 @@ class TrafficManager:
             'path': path,
             'start_time': start_time,
             'speed': speed,
-            'current_index': 0,
+            'current_index': this_time,
             'progress': 0.0,
             'estimated_completion_time': start_time + self._estimate_path_time(path, speed),
             'reservations': []  # 时间窗口预留
@@ -71,6 +617,9 @@ class TrafficManager:
         
         # 更新冲突状态
         self._update_conflict_status()
+        
+        # 为路径添加空间时间预留
+        self.reservation_table.reserve_path(vehicle_id, path, start_time, speed)
         
         return True
     
@@ -177,6 +726,9 @@ class TrafficManager:
                     if t in self.vehicle_reservations[path_id] and vehicle_id in self.vehicle_reservations[path_id][t]:
                         self.vehicle_reservations[path_id][t].remove(vehicle_id)
         
+        # 清除空间时间预留
+        self.reservation_table.remove_reservation(vehicle_id)
+        
         # 删除路径信息
         del self.vehicle_paths[vehicle_id]
         
@@ -269,6 +821,17 @@ class TrafficManager:
             # 更新时间
             current_time += segment_time
         
+        # 使用ECBS检查器检查更精细的冲突
+        for other_vehicle_id, other_path_info in self.vehicle_paths.items():
+            if other_vehicle_id != vehicle_id:
+                conflict = self.conflict_detector.check_path_conflict(
+                    vehicle_id, path,
+                    other_vehicle_id, other_path_info['path']
+                )
+                
+                if conflict:
+                    return True  # 有冲突
+        
         return False  # 无冲突
     
     def suggest_speed_adjustment(self, vehicle_id):
@@ -335,20 +898,249 @@ class TrafficManager:
         else:
             return 1.0  # 保持当前速度
     
+    def detect_conflicts(self, paths):
+        """
+        检测路径集合中的冲突
+        
+        Args:
+            paths: 路径字典 {vehicle_id: path}
+            
+        Returns:
+            list: 冲突列表
+        """
+        conflicts = []
+        vehicles = list(paths.keys())
+        
+        # 检查成对车辆之间的冲突
+        for i in range(len(vehicles)):
+            for j in range(i+1, len(vehicles)):
+                v1 = vehicles[i]
+                v2 = vehicles[j]
+                path1 = paths[v1]
+                path2 = paths[v2]
+                
+                # 检查不同类型的冲突
+                
+                # 1. 主干连接点冲突 (入口点)
+                conn_conflict = self._check_connection_conflict(v1, path1, v2, path2)
+                if conn_conflict:
+                    conflicts.append(conn_conflict)
+                    continue
+                    
+                # 2. 主干穿越冲突 (同一路径段)
+                trav_conflict = self._check_traversal_conflict(v1, path1, v2, path2)
+                if trav_conflict:
+                    conflicts.append(trav_conflict)
+                    continue
+                    
+                # 3. 一般路径冲突
+                gen_conflict = self.conflict_detector.check_path_conflict(v1, path1, v2, path2)
+                if gen_conflict:
+                    conflicts.append(gen_conflict)
+        
+        return conflicts
+    
+    def _check_connection_conflict(self, v1, path1, v2, path2):
+        """检查两个车辆是否在同一主干连接点上产生冲突"""
+        # 找出两个路径中的主干连接点
+        conn_points1 = self._find_backbone_connections(path1)
+        conn_points2 = self._find_backbone_connections(path2)
+        
+        # 如果其中一个路径没有连接点，则无连接点冲突
+        if not conn_points1 or not conn_points2:
+            return None
+        
+        # 检查每对连接点
+        for cp1 in conn_points1:
+            for cp2 in conn_points2:
+                # 如果使用同一个连接点且时间接近
+                if self._is_same_connection(cp1['conn'], cp2['conn']):
+                    if abs(cp1['time'] - cp2['time']) < 5.0:  # 时间阈值
+                        return Conflict(
+                            agent1=v1, 
+                            agent2=v2,
+                            location=cp1['conn']['position'],
+                            time_step=min(cp1['time'], cp2['time']),
+                            conflict_type="connection"
+                        )
+        
+        return None
+    
+    def _check_traversal_conflict(self, v1, path1, v2, path2):
+        """检查两个车辆是否在主干路径上产生穿越冲突"""
+        # 查找每个路径使用的主干路径段
+        segments1 = self._identify_backbone_segments(path1)
+        segments2 = self._identify_backbone_segments(path2)
+        
+        # 如果其中一个路径没有主干段，则无穿越冲突
+        if not segments1 or not segments2:
+            return None
+        
+        # 检查是否有共同的主干路径段
+        for seg1 in segments1:
+            for seg2 in segments2:
+                # 如果在同一主干路径上
+                if seg1['path_id'] == seg2['path_id']:
+                    # 检查时间重叠
+                    if (seg1['time_start'] <= seg2['time_end'] and 
+                        seg2['time_start'] <= seg1['time_end']):
+                        
+                        # 计算重叠区域
+                        overlap_start = max(seg1['time_start'], seg2['time_start'])
+                        overlap_end = min(seg1['time_end'], seg2['time_end'])
+                        
+                        # 创建冲突对象
+                        return Conflict(
+                            agent1=v1,
+                            agent2=v2,
+                            location=f"backbone_{seg1['path_id']}",
+                            time_step=(overlap_start + overlap_end) / 2,
+                            conflict_type="traversal"
+                        )
+        
+        return None
+    
+    def _find_backbone_connections(self, path):
+        """在路径中找出主干网络连接点"""
+        if not self.backbone_network or not path:
+            return []
+        
+        connections = []
+        current_time = 0
+        speed = 1.0  # 假设默认速度
+        
+        # 检查路径中的每个点
+        for i in range(len(path)):
+            point = path[i]
+            
+            # 查找最近的连接点
+            conn = self.backbone_network.find_nearest_connection(
+                point, 
+                max_distance=2.0  # 小范围内查找
+            )
+            
+            if conn:
+                connections.append({
+                    'conn': conn,
+                    'path_index': i,
+                    'time': current_time
+                })
+            
+            # 更新时间
+            if i < len(path) - 1:
+                segment_length = self._calculate_distance(path[i], path[i+1])
+                current_time += segment_length / speed
+        
+        return connections
+    
+    def _is_same_connection(self, conn1, conn2):
+        """判断两个连接点是否为同一个"""
+        if not conn1 or not conn2:
+            return False
+        
+        # 比较路径ID和索引
+        if conn1.get('path_id') == conn2.get('path_id'):
+            # 索引接近即视为同一连接点
+            idx1 = conn1.get('path_index', 0)
+            idx2 = conn2.get('path_index', 0)
+            return abs(idx1 - idx2) <= 2
+        
+        # 比较位置
+        pos1 = conn1.get('position')
+        pos2 = conn2.get('position')
+        if pos1 and pos2:
+            return self._calculate_distance(pos1, pos2) < 3.0
+        
+        return False
+    
+    def _identify_backbone_segments(self, path):
+        """识别路径中的主干网络段"""
+        if not self.backbone_network or not path:
+            return []
+        
+        segments = []
+        current_segment = None
+        current_time = 0
+        speed = 1.0  # 假设默认速度
+        
+        # 检查路径中的每个点
+        for i in range(len(path) - 1):
+            p1 = path[i]
+            p2 = path[i+1]
+            
+            # 计算此段时间
+            segment_length = self._calculate_distance(p1, p2)
+            segment_time = segment_length / speed
+            
+            # 检查此段是否属于主干网络
+            backbone_path_id = None
+            for path_id, path_data in self.backbone_network.paths.items():
+                backbone_path = path_data['path']
+                
+                for j in range(len(backbone_path) - 1):
+                    if (self._is_same_point(p1, backbone_path[j]) and 
+                        self._is_same_point(p2, backbone_path[j+1])):
+                        backbone_path_id = path_id
+                        break
+                
+                if backbone_path_id:
+                    break
+            
+            # 更新当前段信息
+            if backbone_path_id:
+                if current_segment and current_segment['path_id'] == backbone_path_id:
+                    # 扩展当前段
+                    current_segment['end_index'] = i + 1
+                    current_segment['time_end'] = current_time + segment_time
+                else:
+                    # 如果有之前的段，保存它
+                    if current_segment:
+                        segments.append(current_segment)
+                    
+                    # 创建新段
+                    current_segment = {
+                        'path_id': backbone_path_id,
+                        'start_index': i,
+                        'end_index': i + 1,
+                        'time_start': current_time,
+                        'time_end': current_time + segment_time
+                    }
+            elif current_segment:
+                # 离开主干网络，保存当前段
+                segments.append(current_segment)
+                current_segment = None
+            
+            # 更新时间
+            current_time += segment_time
+        
+        # 保存最后一个段
+        if current_segment:
+            segments.append(current_segment)
+        
+        return segments
+    
     def suggest_path_adjustment(self, vehicle_id, start, goal):
-        """为避免冲突建议路径调整"""
+        """
+        为避免冲突建议路径调整 - 使用ECBS寻找最优路径
+        
+        Args:
+            vehicle_id: 车辆ID
+            start: 起点
+            goal: 终点
+            
+        Returns:
+            list or None: 调整后的路径，如果无法调整则返回None
+        """
         # 如果车辆已有路径，将其暂时释放
         had_path = vehicle_id in self.vehicle_paths
         if had_path:
             original_path_info = self.vehicle_paths[vehicle_id]
             self.release_vehicle_path(vehicle_id)
         
-        # 创建临时规划器
+        # 获取路径规划器
+        planner = None
         if hasattr(self.env, 'path_planner') and self.env.path_planner:
             planner = self.env.path_planner
-        else:
-            # 创建临时规划器，根据实际需要修改
-            planner = None
         
         if not planner:
             if had_path:
@@ -361,96 +1153,439 @@ class TrafficManager:
                 )
             return None
         
-        # 尝试生成几条不同的路径
-        num_attempts = 3
-        potential_paths = []
+        # 收集当前所有车辆的路径
+        paths = {}
+        for v_id, v_path_info in self.vehicle_paths.items():
+            paths[v_id] = v_path_info['path']
         
-        for i in range(num_attempts):
-            # 调整规划参数，例如在主干网络中选择不同的连接点
-            # 具体实现取决于规划器的接口
-            path = planner.plan_path(vehicle_id, start, goal)
-            
-            if path:
-                # 检查路径冲突
-                has_conflict = self.check_path_conflicts(vehicle_id, path)
-                
-                potential_paths.append({
-                    'path': path,
-                    'has_conflict': has_conflict,
-                    'length': self._calculate_path_length(path)
-                })
+        # 为当前车辆规划基本路径
+        initial_path = planner.plan_path(vehicle_id, start, goal, check_conflicts=False)
         
-        # 如果有无冲突的路径，选择最短的
-        conflict_free_paths = [p for p in potential_paths if not p['has_conflict']]
-        
-        if conflict_free_paths:
-            best_path = min(conflict_free_paths, key=lambda p: p['length'])
-            
+        if not initial_path:
             if had_path:
-                # 与原路径比较
-                original_length = self._calculate_path_length(original_path_info['path'])
-                
-                # 如果新路径比原路径长太多，可能不值得调整
-                if best_path['length'] > original_length * 1.5:
-                    # 恢复原路径
-                    self.register_vehicle_path(
-                        vehicle_id,
-                        original_path_info['path'],
-                        original_path_info['start_time'],
-                        original_path_info['speed']
-                    )
-                    return None
-            
-            return best_path['path']
+                # 恢复原路径
+                self.register_vehicle_path(
+                    vehicle_id,
+                    original_path_info['path'],
+                    original_path_info['start_time'],
+                    original_path_info['speed']
+                )
+            return None
         
-        # 如果所有路径都有冲突，或者无法生成路径
-        if had_path:
-            # 恢复原路径
-            self.register_vehicle_path(
-                vehicle_id,
-                original_path_info['path'],
-                original_path_info['start_time'],
-                original_path_info['speed']
+        # 将当前车辆的初始路径添加到路径字典
+        paths[vehicle_id] = initial_path
+        
+        # 使用ECBS解决冲突
+        conflict_free_paths = self.resolve_conflicts(paths)
+        
+        if not conflict_free_paths or vehicle_id not in conflict_free_paths:
+            if had_path:
+                # 恢复原路径
+                self.register_vehicle_path(
+                    vehicle_id,
+                    original_path_info['path'],
+                    original_path_info['start_time'],
+                    original_path_info['speed']
+                )
+            return None
+        
+        # 返回无冲突的路径
+        return conflict_free_paths[vehicle_id]
+    
+    def resolve_conflicts(self, paths):
+        """
+        使用ECBS风格的约束树搜索解决冲突
+        
+        Args:
+            paths: 初始路径字典 {vehicle_id: path}
+            
+        Returns:
+            dict: 无冲突的路径字典，如果无法解决则返回None
+        """
+        # 初始化约束树根节点
+        root = ConstraintTreeNode(
+            constraints=[],
+            solution=paths.copy(),
+            cost=self._calculate_solution_cost(paths)
+        )
+        
+        # 检测初始冲突
+        root.conflicts = self.detect_conflicts(root.solution)
+        root.conflict_count = len(root.conflicts)
+        
+        # 初始化搜索
+        self.open_list = [root]
+        self.focal_list = [root]
+        
+        # 最大迭代次数
+        max_iterations = 1000
+        iterations = 0
+        
+        # ECBS搜索
+        while self.open_list and iterations < max_iterations:
+            iterations += 1
+            
+            # 从focal list中获取冲突最少的节点
+            current = self._get_best_node()
+            
+            # 检查冲突
+            if not current.conflicts:
+                # 如果无冲突，找到解决方案
+                return current.solution
+            
+            # 选择第一个冲突
+            conflict = current.conflicts[0]
+            
+            # 为两个车辆生成约束
+            constraint1 = self._generate_constraint(conflict.agent1, conflict)
+            constraint2 = self._generate_constraint(conflict.agent2, conflict)
+            
+            # 创建子节点并添加到搜索树
+            for constraint in [constraint1, constraint2]:
+                # 创建子节点
+                child = self._create_child_node(current, constraint)
+                
+                if child:
+                    # 添加到open list
+                    heapq.heappush(self.open_list, child)
+                    
+                    # 更新focal list
+                    self._update_focal_list()
+        
+        # 如果达到最大迭代次数，返回找到的最佳解决方案
+        return self._get_best_solution()
+    
+    def _get_best_node(self):
+        """从focal list中获取最佳节点（冲突最少）"""
+        if not self.focal_list:
+            return None
+        
+        # 找到冲突最少的节点
+        best_node = min(self.focal_list, key=lambda n: n.conflict_count)
+        
+        # 从两个列表中移除
+        self.focal_list.remove(best_node)
+        self.open_list.remove(best_node)
+        
+        return best_node
+    
+    def _update_focal_list(self):
+        """更新focal list，确保只包含在次优界限内的节点"""
+        if not self.open_list:
+            self.focal_list = []
+            return
+        
+        # 找到open list中成本最小的节点
+        min_cost = min(node.cost for node in self.open_list)
+        
+        # 次优界限
+        focal_bound = min_cost * self.suboptimality_bound
+        
+        # 更新focal list
+        self.focal_list = [node for node in self.open_list if node.cost <= focal_bound]
+    
+    def _get_best_solution(self):
+        """获取open list中最佳的解决方案"""
+        if not self.open_list:
+            return None
+        
+        # 找到冲突最少的节点
+        best_node = min(self.open_list, key=lambda n: n.conflict_count)
+        
+        return best_node.solution
+    
+    def _generate_constraint(self, agent_id, conflict):
+        """根据冲突生成约束"""
+        if conflict.conflict_type == "vertex":
+            # 顶点约束 - 禁止在特定时间点处于特定位置
+            return Constraint(
+                agent_id=agent_id,
+                location=conflict.location,
+                time_step=conflict.time_step,
+                constraint_type="vertex"
             )
+        elif conflict.conflict_type == "edge":
+            # 边约束 - 禁止在特定时间段内穿过特定边
+            return Constraint(
+                agent_id=agent_id,
+                location=conflict.location,
+                time_step=conflict.time_step,
+                constraint_type="edge"
+            )
+        elif conflict.conflict_type == "connection":
+            # 连接点约束 - 禁止在特定时间使用特定连接点
+            return Constraint(
+                agent_id=agent_id,
+                location=conflict.location,
+                time_step=conflict.time_step,
+                constraint_type="connection"
+            )
+        elif conflict.conflict_type == "traversal":
+            # 穿越约束 - 禁止在特定时间区间内穿越主干路径
+            return Constraint(
+                agent_id=agent_id,
+                location=conflict.location,
+                time_step=conflict.time_step,
+                constraint_type="traversal"
+            )
+        elif conflict.conflict_type == "following":
+            # 追逐约束 - 强制减速或加速
+            return Constraint(
+                agent_id=agent_id,
+                location=conflict.location,
+                time_step=conflict.time_step,
+                constraint_type="following"
+            )
+        else:
+            # 默认为顶点约束
+            return Constraint(
+                agent_id=agent_id,
+                location=conflict.location,
+                time_step=conflict.time_step,
+                constraint_type="vertex"
+            )
+    
+    def _create_child_node(self, parent, constraint):
+        """创建并返回子节点"""
+        # 创建新的约束列表
+        new_constraints = parent.constraints.copy()
+        new_constraints.append(constraint)
+        
+        # 复制解决方案
+        new_solution = parent.solution.copy()
+        
+        # 应用约束并重新规划受影响车辆的路径
+        agent_id = constraint.agent_id
+        
+        if agent_id in new_solution:
+            # 找到受约束车辆的起终点
+            agent_path = new_solution[agent_id]
+            
+            if not agent_path or len(agent_path) < 2:
+                return None
+                
+            start = agent_path[0]
+            goal = agent_path[-1]
+            
+            # 应用约束重新规划路径
+            new_path = self._apply_constraint(agent_id, constraint, parent.solution)
+            
+            if not new_path:
+                # 如果无法满足约束，返回None
+                return None
+                
+            # 更新解决方案
+            new_solution[agent_id] = new_path
+            
+            # 计算新成本
+            new_cost = self._calculate_solution_cost(new_solution)
+            
+            # 检测新的冲突
+            new_conflicts = self.detect_conflicts(new_solution)
+            
+            # 创建子节点
+            child = ConstraintTreeNode(
+                constraints=new_constraints,
+                solution=new_solution,
+                cost=new_cost,
+                conflicts=new_conflicts,
+                parent=parent
+            )
+            
+            return child
         
         return None
     
-    def _detect_upcoming_conflicts(self, vehicle_id, path_info):
-        """检测即将到来的冲突"""
-        conflicts = []
+    def _apply_constraint(self, agent_id, constraint, solution):
+        """
+        应用约束并重新规划路径
         
-        # 检查每个预留是否有冲突
-        for reservation in path_info['reservations']:
-            path_id = reservation['path_id']
-            time_window = reservation['time_window']
+        Args:
+            agent_id: 车辆ID
+            constraint: 约束对象
+            solution: 当前解决方案
             
-            # 检查本车辆已经过了的时间窗口部分
-            current_time = self.env.current_time if hasattr(self.env, 'current_time') else 0
-            
-            # 只检查未来的时间窗口
-            for t in range(max(current_time, time_window[0]), time_window[1] + 1):
-                if path_id in self.vehicle_reservations and t in self.vehicle_reservations[path_id]:
-                    vehicles = self.vehicle_reservations[path_id][t]
-                    
-                    # 如果预留车辆数超过车道数，则有冲突
-                    max_lanes = self.rules.get('path_lanes', {}).get(path_id, 1)
-                    
-                    if len(vehicles) > max_lanes:
-                        conflicts.append({
-                            'path_id': path_id,
-                            'time': t,
-                            'vehicles': vehicles.copy()
-                        })
+        Returns:
+            list or None: 满足约束的新路径，如果无法满足则返回None
+        """
+        # 获取当前路径
+        current_path = solution[agent_id]
         
-        return conflicts
+        if not current_path or len(current_path) < 2:
+            return None
+            
+        # 获取起点和终点
+        start = current_path[0]
+        goal = current_path[-1]
+        
+        # 找出是否是主干路径段
+        backbone_segments = self._identify_backbone_segments(current_path)
+        
+        # 创建路径规划器
+        planner = None
+        if hasattr(self.env, 'path_planner') and self.env.path_planner:
+            planner = self.env.path_planner
+        
+        if not planner:
+            return None
+        
+        # 根据约束类型处理
+        if constraint.constraint_type == "vertex":
+            # 顶点约束 - 避免特定时间点处于特定位置
+            # 创建临时检查函数，在规划时避开约束位置
+            def custom_collision_checker(x, y, theta):
+                # 检查是否接近约束位置
+                if constraint.location:
+                    dist = self._calculate_distance((x, y), constraint.location)
+                    if dist < 2.0:  # 安全距离
+                        return False
+                return True
+            
+            # 保存原有的碰撞检测器
+            original_checker = None
+            if hasattr(planner, 'collision_checker'):
+                original_checker = planner.collision_checker
+            
+            # 设置临时检测器
+            planner.collision_checker = custom_collision_checker
+            
+            # 重新规划路径
+            new_path = planner.plan_path(agent_id, start, goal, check_conflicts=False)
+            
+            # 恢复原有检测器
+            if original_checker:
+                planner.collision_checker = original_checker
+            
+            return new_path
+            
+        elif constraint.constraint_type in ["edge", "connection", "traversal"]:
+            # 对于这些约束，尝试保留尽可能多的主干使用
+            # 找出约束影响的主干段
+            constrained_segment = None
+            
+            for segment in backbone_segments:
+                if isinstance(constraint.location, str) and "backbone_" in constraint.location:
+                    # 提取主干路径ID
+                    path_id = constraint.location.replace("backbone_", "")
+                    if segment['path_id'] == path_id:
+                        constrained_segment = segment
+                        break
+            
+            # 如果约束影响主干段，尝试避开该段
+            if constrained_segment:
+                # 找到替代路径
+                modified_path = self._find_alternative_backbone_path(
+                    current_path, 
+                    constrained_segment,
+                    start,
+                    goal
+                )
+                
+                if modified_path:
+                    return modified_path
+            
+            # 如果没有找到合适的替代主干路径，尝试完全规划
+            return planner.plan_path(agent_id, start, goal, use_backbone=True, check_conflicts=False)
+            
+        elif constraint.constraint_type == "following":
+            # 追逐约束 - 调整速度或等待时间
+            # 简单实现：添加延迟点，强制车辆等待
+            delay_path = current_path.copy()
+            
+            # 在开始处添加一些额外点以创造延迟
+            first_point = delay_path[0]
+            delay_points = [first_point] * 3  # 添加3个相同的点，模拟等待
+            
+            delay_path = delay_points + delay_path[1:]
+            
+            return delay_path
+        
+        # 默认情况：完全重新规划
+        return planner.plan_path(agent_id, start, goal, use_backbone=True, check_conflicts=False)
     
-    def _estimate_path_time(self, path, speed):
-        """估计路径完成时间"""
-        if not path or len(path) < 2:
-            return 0
+    def _find_alternative_backbone_path(self, current_path, constrained_segment, start, goal):
+        """查找替代主干路径，避开受约束的段"""
+        # 这里需要使用路径规划器
+        planner = None
+        if hasattr(self.env, 'path_planner') and self.env.path_planner:
+            planner = self.env.path_planner
+        
+        if not planner or not self.backbone_network:
+            return None
+        
+        # 找到约束段之前的点和之后的点
+        pre_constraint = current_path[max(0, constrained_segment['start_index'] - 1)]
+        post_constraint = current_path[min(len(current_path) - 1, constrained_segment['end_index'] + 1)]
+        
+        # 尝试找到另一条主干路径连接这两点
+        try:
+            # 找到最近的主干连接点
+            pre_conn = self.backbone_network.find_nearest_connection(pre_constraint)
+            post_conn = self.backbone_network.find_nearest_connection(post_constraint)
             
-        total_length = self._calculate_path_length(path)
-        return total_length / speed
+            if pre_conn and post_conn and pre_conn['path_id'] != constrained_segment['path_id']:
+                # 找到连接这两个连接点的主干路径
+                connecting_path = planner.plan_path(
+                    0,  # 临时车辆ID
+                    pre_conn['position'],
+                    post_conn['position'],
+                    use_backbone=True,
+                    check_conflicts=False
+                )
+                
+                if connecting_path:
+                    # 构建完整路径
+                    # 1. 起点到pre_constraint
+                    start_to_pre = current_path[:constrained_segment['start_index']]
+                    
+                    # 2. 连接路径
+                    # 3. post_constraint到终点
+                    post_to_end = current_path[constrained_segment['end_index']+1:]
+                    
+                    # 组合路径
+                    alternative_path = start_to_pre + connecting_path[1:-1] + post_to_end
+                    
+                    return alternative_path
+        except Exception as e:
+            # 如果出现错误，返回None
+            print(f"寻找替代路径错误: {str(e)}")
+            return None
+        
+        return None
+    
+    def _calculate_solution_cost(self, solution):
+        """计算解决方案总成本"""
+        total_cost = 0
+        
+        for vehicle_id, path in solution.items():
+            if path:
+                # 路径长度
+                length = self._calculate_path_length(path)
+                
+                # 流量因子，在高流量路径上行驶成本更高
+                flow_factor = 1.0
+                backbone_segments = self._identify_backbone_segments(path)
+                
+                for segment in backbone_segments:
+                    path_id = segment['path_id']
+                    if path_id in self.backbone_network.paths:
+                        # 获取流量
+                        traffic_flow = self.backbone_network.paths[path_id].get('traffic_flow', 0)
+                        capacity = self.backbone_network.paths[path_id].get('capacity', 1)
+                        
+                        # 流量比例
+                        flow_ratio = min(1.0, traffic_flow / max(1, capacity))
+                        
+                        # 增加流量因子
+                        flow_factor += flow_ratio * 0.2  # 最多增加20%成本
+                
+                # 计算路径成本
+                path_cost = length * flow_factor
+                
+                # 添加到总成本
+                total_cost += path_cost
+        
+        return total_cost
     
     def _calculate_path_length(self, path):
         """计算路径总长度"""
@@ -506,3 +1641,40 @@ class TrafficManager:
             return dot_product < 0
         
         return False
+    
+    def _detect_upcoming_conflicts(self, vehicle_id, path_info):
+        """检测即将到来的冲突"""
+        conflicts = []
+        
+        # 检查每个预留是否有冲突
+        for reservation in path_info['reservations']:
+            path_id = reservation['path_id']
+            time_window = reservation['time_window']
+            
+            # 检查本车辆已经过了的时间窗口部分
+            current_time = self.env.current_time if hasattr(self.env, 'current_time') else 0
+            
+            # 只检查未来的时间窗口
+            for t in range(max(current_time, time_window[0]), time_window[1] + 1):
+                if path_id in self.vehicle_reservations and t in self.vehicle_reservations[path_id]:
+                    vehicles = self.vehicle_reservations[path_id][t]
+                    
+                    # 如果预留车辆数超过车道数，则有冲突
+                    max_lanes = self.rules.get('path_lanes', {}).get(path_id, 1)
+                    
+                    if len(vehicles) > max_lanes:
+                        conflicts.append({
+                            'path_id': path_id,
+                            'time': t,
+                            'vehicles': vehicles.copy()
+                        })
+        
+        return conflicts
+    
+    def _estimate_path_time(self, path, speed):
+        """估计路径完成时间"""
+        if not path or len(path) < 2:
+            return 0
+            
+        total_length = self._calculate_path_length(path)
+        return total_length / speed

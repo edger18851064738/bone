@@ -310,3 +310,42 @@ backbone_network.update_traffic_flow(path_id, -1)
 
 The implementation includes all the methods from your original code but with enhanced documentation and proper error handling. It should integrate well with your existing path_planner.py and traffic_manager.py components.
 Would you like me to explain any specific part of the implementation in more detail?
+
+集成参考：# Create the environment
+env = OpenPitMineEnv(width=500, height=500)
+
+# Create the path planner with the environment
+path_planner = PathPlanner(env)
+
+# Create the backbone network
+backbone_network = BackbonePathNetwork(env)
+backbone_network.generate_network()
+
+# Set the backbone network to the path planner
+path_planner.set_backbone_network(backbone_network)
+
+# Create the ECBS traffic manager
+traffic_manager = TrafficManager(env, backbone_network)
+
+# Create the ECBS-enhanced vehicle scheduler
+scheduler = ECBSVehicleScheduler(env, path_planner, traffic_manager)
+
+# Initialize all components
+scheduler.initialize_vehicles()
+
+# Create mission templates
+scheduler.create_ecbs_mission_template("standard_cycle")
+
+# Assign missions to vehicles
+for vehicle_id in env.vehicles.keys():
+    scheduler.assign_mission(vehicle_id, "standard_cycle")
+
+# Start the simulation
+env.start()
+
+# In your update loop:
+def update(time_delta):
+    # Update the scheduler, which will use ECBS to coordinate paths
+    scheduler.update(time_delta)
+    # Update the environment
+    env.update(time_delta)

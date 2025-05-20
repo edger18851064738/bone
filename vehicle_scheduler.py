@@ -434,3 +434,559 @@ class VehicleScheduler:
             self.stats['average_utilization'] = total_utilization / len(self.vehicle_statuses)
         
         return self.stats
+
+import math
+import heapq
+from typing import List, Dict, Tuple, Set, Optional, Any
+from vehicle_scheduler import VehicleTask, VehicleScheduler
+
+class ECBSVehicleScheduler(VehicleScheduler):
+    """ECBS增强版车辆调度器，结合了ECBS原理进行任务协调和冲突解决"""
+    
+    def __init__(self, env, path_planner=None, traffic_manager=None):
+        """
+        初始化ECBS车辆调度器
+        
+        Args:
+            env: 环境对象
+            path_planner: 路径规划器
+            traffic_manager: 交通管理器
+        """
+        super().__init__(env, path_planner)
+        self.traffic_manager = traffic_manager
+        
+        # ECBS特有属性
+        self.vehicle_priorities = {}  # 车辆优先级 {vehicle_id: priority}
+        self.task_priorities = {}     # 任务优先级 {task_id: priority}
+        self.conflict_counts = {}     # 车辆冲突计数 {vehicle_id: count}
+        
+        # 冲突解决策略
+        self.conflict_resolution_strategy = 'ecbs'  # 'ecbs', 'priority', 'time_window'
+        
+        # 并行执行控制
+        self.parallel_execution = True
+        self.max_parallel_vehicles = 5  # 最大并行车辆数
+        
+        # 批量任务规划参数
+        self.batch_planning = True
+        self.max_batch_size = 10
+        self.planning_horizon = 100.0  # 规划时间范围
+    
+    def set_traffic_manager(self, traffic_manager):
+        """设置交通管理器"""
+        self.traffic_manager = traffic_manager
+    
+    def initialize_vehicles(self):
+        """初始化车辆状态，并设置初始优先级"""
+        super().initialize_vehicles()
+        
+        # 根据车辆ID设置初始优先级（简单策略：ID越小优先级越高）
+        for i, vehicle_id in enumerate(self.vehicle_statuses.keys()):
+            self.vehicle_priorities[vehicle_id] = len(self.vehicle_statuses) - i
+            self.conflict_counts[vehicle_id] = 0
+    
+    def assign_tasks_batch(self, tasks_batch):
+        """
+        使用ECBS原理批量分配任务
+        
+        Args:
+            tasks_batch: 任务列表
+            
+        Returns:
+            dict: 分配结果 {vehicle_id: task_id}
+        """
+        if not tasks_batch:
+            return {}
+            
+        # 按优先级排序任务
+        sorted_tasks = sorted(
+            tasks_batch, 
+            key=lambda t: self.task_priorities.get(t.task_id, 1),
+            reverse=True
+        )
+        
+        # 初始化分配结果
+        assignments = {}
+        
+        # 为每个任务找到最佳车辆
+        for task in sorted_tasks:
+            # 寻找最合适的车辆
+            best_vehicle = self._find_best_vehicle_for_task(task)
+            
+            if best_vehicle:
+                assignments[best_vehicle] = task.task_id
+                self.assign_task(best_vehicle, task.task_id)
+        
+        # 如果设置了批量规划，为所有分配的车辆规划协调路径
+        if self.batch_planning and assignments:
+            vehicle_ids = list(assignments.keys())
+            self._plan_coordinated_paths(vehicle_ids)
+        
+        return assignments
+    
+    def _find_best_vehicle_for_task(self, task):
+        """
+        为任务找到最佳车辆，考虑多种因素
+        
+        Args:
+            task: 任务对象
+            
+        Returns:
+            int or None: 最佳车辆ID，如果没找到则返回None
+        """
+        best_vehicle = None
+        best_score = float('-inf')
+        
+        for vehicle_id, status in self.vehicle_statuses.items():
+            # 如果车辆有太多任务，跳过
+            if vehicle_id in self.task_queues and len(self.task_queues[vehicle_id]) > 3:
+                continue
+                
+            # 计算距离因素
+            distance = math.sqrt(
+                (status['position'][0] - task.start[0])**2 + 
+                (status['position'][1] - task.start[1])**2
+            )
+            distance_score = 1000 / (distance + 10)  # 避免除零
+            
+            # 计算负载因素
+            load_factor = 1.0
+            if task.task_type == 'to_unloading' and status['load'] < status['max_load'] * 0.5:
+                load_factor = 0.5  # 降低空车去卸载点的分数
+            elif task.task_type == 'to_loading' and status['load'] > status['max_load'] * 0.5:
+                load_factor = 0.5  # 降低满载车去装载点的分数
+            
+            # 计算优先级因素
+            priority_factor = self.vehicle_priorities.get(vehicle_id, 1) / 10.0
+            
+            # 计算冲突历史因素 - 冲突越多，分数越低
+            conflict_factor = 1.0 / (1.0 + 0.1 * self.conflict_counts.get(vehicle_id, 0))
+            
+            # 计算总分
+            score = distance_score * load_factor * priority_factor * conflict_factor
+            
+            # 如果是当前空闲的车辆，额外加分
+            if status['status'] == 'idle':
+                score *= 1.5
+            
+            # 更新最佳车辆
+            if score > best_score:
+                best_score = score
+                best_vehicle = vehicle_id
+        
+        return best_vehicle
+    
+    def _plan_coordinated_paths(self, vehicle_ids):
+        """
+        为多个车辆规划协调的无冲突路径
+        
+        Args:
+            vehicle_ids: 车辆ID列表
+            
+        Returns:
+            bool: 规划是否成功
+        """
+        if not self.traffic_manager or not vehicle_ids:
+            return False
+            
+        # 收集每个车辆的当前任务和路径需求
+        paths = {}
+        vehicle_tasks = {}
+        
+        for vehicle_id in vehicle_ids:
+            # 获取当前任务
+            task_id = self.vehicle_statuses[vehicle_id]['current_task']
+            if not task_id or task_id not in self.tasks:
+                continue
+                
+            task = self.tasks[task_id]
+            vehicle_tasks[vehicle_id] = task
+            
+            # 规划初始路径
+            path = self._plan_initial_path(vehicle_id, task.start, task.goal)
+            
+            if path:
+                paths[vehicle_id] = path
+        
+        # 如果我们有多个车辆的路径，使用ECBS解决冲突
+        if len(paths) > 1:
+            # 使用交通管理器解决冲突
+            conflict_free_paths = self.traffic_manager.resolve_conflicts(paths)
+            
+            if conflict_free_paths:
+                # 更新任务和车辆的路径
+                for vehicle_id, path in conflict_free_paths.items():
+                    if vehicle_id in vehicle_tasks:
+                        task = vehicle_tasks[vehicle_id]
+                        task.path = path
+                        
+                        # 更新车辆路径
+                        if vehicle_id in self.env.vehicles:
+                            self.env.vehicles[vehicle_id]['path'] = path
+                            self.env.vehicles[vehicle_id]['path_index'] = 0
+                            self.env.vehicles[vehicle_id]['progress'] = 0.0
+                
+                return True
+        elif len(paths) == 1:
+            # 只有一个车辆，直接使用路径
+            vehicle_id = list(paths.keys())[0]
+            task = vehicle_tasks[vehicle_id]
+            task.path = paths[vehicle_id]
+            
+            # 更新车辆路径
+            if vehicle_id in self.env.vehicles:
+                self.env.vehicles[vehicle_id]['path'] = task.path
+                self.env.vehicles[vehicle_id]['path_index'] = 0
+                self.env.vehicles[vehicle_id]['progress'] = 0.0
+            
+            return True
+        
+        return False
+    
+    def _plan_initial_path(self, vehicle_id, start, goal):
+        """
+        规划初始路径
+        
+        Args:
+            vehicle_id: 车辆ID
+            start: 起点
+            goal: 终点
+            
+        Returns:
+            list or None: 路径点列表
+        """
+        if self.path_planner:
+            path = self.path_planner.plan_path(
+                vehicle_id,
+                start,
+                goal,
+                use_backbone=True,  # 优先使用主干网络
+                check_conflicts=False  # 冲突检查将在ECBS中统一处理
+            )
+            return path
+        return None
+    
+    def update(self, time_delta):
+        """
+        更新所有车辆状态和任务进度，包括冲突检测和解决
+        
+        Args:
+            time_delta: 时间步长
+            
+        Returns:
+            bool: 更新是否成功
+        """
+        # 首先更新车辆和任务状态
+        for vehicle_id in list(self.vehicle_statuses.keys()):
+            self._update_vehicle(vehicle_id, time_delta)
+        
+        # 检查当前执行中的路径是否有冲突
+        if self.traffic_manager:
+            self._check_and_resolve_execution_conflicts()
+        
+        # 选择下一批要执行的任务
+        self._select_next_batch_tasks()
+        
+        return True
+    
+    def _check_and_resolve_execution_conflicts(self):
+        """检查并解决执行中的路径冲突"""
+        # 收集当前活动的车辆和路径
+        active_vehicles = []
+        active_paths = {}
+        
+        for vehicle_id, status in self.vehicle_statuses.items():
+            if status['status'] == 'moving' and status['current_task']:
+                active_vehicles.append(vehicle_id)
+                
+                # 获取当前路径
+                task_id = status['current_task']
+                if task_id in self.tasks and self.tasks[task_id].path:
+                    # 获取剩余路径 - 从当前位置到终点
+                    if vehicle_id in self.env.vehicles:
+                        vehicle = self.env.vehicles[vehicle_id]
+                        path_index = vehicle.get('path_index', 0)
+                        path = self.tasks[task_id].path[path_index:]
+                        active_paths[vehicle_id] = path
+        
+        # 如果有多个活动车辆，检查冲突
+        if len(active_vehicles) > 1:
+            conflicts = self.traffic_manager.detect_conflicts(active_paths)
+            
+            # 如果发现冲突，记录并解决
+            if conflicts:
+                # 记录冲突车辆
+                for conflict in conflicts:
+                    self.conflict_counts[conflict.agent1] = self.conflict_counts.get(conflict.agent1, 0) + 1
+                    self.conflict_counts[conflict.agent2] = self.conflict_counts.get(conflict.agent2, 0) + 1
+                
+                # 根据冲突解决策略处理
+                if self.conflict_resolution_strategy == 'ecbs':
+                    # 使用ECBS解决冲突
+                    new_paths = self.traffic_manager.resolve_conflicts(active_paths)
+                    
+                    # 更新路径
+                    if new_paths:
+                        for vehicle_id, path in new_paths.items():
+                            task_id = self.vehicle_statuses[vehicle_id]['current_task']
+                            if task_id in self.tasks:
+                                # 保存原路径的执行状态
+                                orig_path_index = 0
+                                if vehicle_id in self.env.vehicles:
+                                    orig_path_index = self.env.vehicles[vehicle_id].get('path_index', 0)
+                                
+                                # 更新任务路径
+                                self.tasks[task_id].path = path
+                                
+                                # 更新车辆路径
+                                self.env.vehicles[vehicle_id]['path'] = path
+                                self.env.vehicles[vehicle_id]['path_index'] = 0  # 从头开始
+                                self.env.vehicles[vehicle_id]['progress'] = 0.0
+                                
+                                print(f"已解决冲突并重新规划车辆 {vehicle_id} 的路径")
+                
+                elif self.conflict_resolution_strategy == 'priority':
+                    # 基于优先级解决冲突 - 高优先级车辆保持路径，低优先级车辆重新规划
+                    for conflict in conflicts:
+                        # 比较优先级
+                        prio1 = self.vehicle_priorities.get(conflict.agent1, 1)
+                        prio2 = self.vehicle_priorities.get(conflict.agent2, 1)
+                        
+                        # 低优先级车辆重新规划
+                        if prio1 > prio2:
+                            lower_prio_agent = conflict.agent2
+                        else:
+                            lower_prio_agent = conflict.agent1
+                        
+                        # 为低优先级车辆重新规划路径
+                        self._replan_vehicle_path(lower_prio_agent)
+                        
+                elif self.conflict_resolution_strategy == 'time_window':
+                    # 时间窗口策略 - 调整车辆速度以避免冲突
+                    for conflict in conflicts:
+                        # 为两个车辆都尝试调整速度
+                        speed_factor1 = self.traffic_manager.suggest_speed_adjustment(conflict.agent1)
+                        speed_factor2 = self.traffic_manager.suggest_speed_adjustment(conflict.agent2)
+                        
+                        # 应用速度调整
+                        if speed_factor1 and conflict.agent1 in self.env.vehicles:
+                            self.env.vehicles[conflict.agent1]['speed'] = self.env.vehicles[conflict.agent1].get('speed', 1.0) * speed_factor1
+                        
+                        if speed_factor2 and conflict.agent2 in self.env.vehicles:
+                            self.env.vehicles[conflict.agent2]['speed'] = self.env.vehicles[conflict.agent2].get('speed', 1.0) * speed_factor2
+    
+    def _replan_vehicle_path(self, vehicle_id):
+        """为车辆重新规划路径"""
+        if vehicle_id not in self.vehicle_statuses:
+            return False
+            
+        status = self.vehicle_statuses[vehicle_id]
+        task_id = status['current_task']
+        
+        if not task_id or task_id not in self.tasks:
+            return False
+            
+        task = self.tasks[task_id]
+        
+        # 获取当前位置和目标
+        current_pos = status['position']
+        goal = task.goal
+        
+        # 使用交通管理器的建议路径调整
+        if self.traffic_manager:
+            new_path = self.traffic_manager.suggest_path_adjustment(vehicle_id, current_pos, goal)
+            
+            if new_path:
+                # 更新任务路径
+                task.path = new_path
+                
+                # 更新车辆路径
+                if vehicle_id in self.env.vehicles:
+                    self.env.vehicles[vehicle_id]['path'] = new_path
+                    self.env.vehicles[vehicle_id]['path_index'] = 0
+                    self.env.vehicles[vehicle_id]['progress'] = 0.0
+                
+                return True
+        
+        # 交通管理器没有建议路径，使用路径规划器
+        if self.path_planner:
+            new_path = self.path_planner.plan_path(vehicle_id, current_pos, goal)
+            
+            if new_path:
+                # 更新任务路径
+                task.path = new_path
+                
+                # 更新车辆路径
+                if vehicle_id in self.env.vehicles:
+                    self.env.vehicles[vehicle_id]['path'] = new_path
+                    self.env.vehicles[vehicle_id]['path_index'] = 0
+                    self.env.vehicles[vehicle_id]['progress'] = 0.0
+                
+                return True
+        
+        return False
+    
+    def _select_next_batch_tasks(self):
+        """选择下一批要执行的任务"""
+        # 只选择空闲车辆和已经有任务队列的车辆
+        available_vehicles = []
+        
+        for vehicle_id, status in self.vehicle_statuses.items():
+            if status['status'] == 'idle':
+                # 检查是否有任务队列
+                if vehicle_id in self.task_queues and self.task_queues[vehicle_id]:
+                    available_vehicles.append(vehicle_id)
+        
+        # 如果没有可用车辆，直接返回
+        if not available_vehicles:
+            return
+        
+        # 按优先级排序车辆
+        sorted_vehicles = sorted(
+            available_vehicles,
+            key=lambda v: self.vehicle_priorities.get(v, 1),
+            reverse=True
+        )
+        
+        # 限制同时执行的车辆数量
+        batch_vehicles = sorted_vehicles[:self.max_parallel_vehicles]
+        
+        # 为每个选定的车辆启动任务
+        for vehicle_id in batch_vehicles:
+            self._start_next_task(vehicle_id)
+    
+    def adjust_vehicle_priority(self, vehicle_id, adjustment):
+        """根据执行情况调整车辆优先级"""
+        if vehicle_id in self.vehicle_priorities:
+            self.vehicle_priorities[vehicle_id] += adjustment
+            # 确保优先级不为负
+            self.vehicle_priorities[vehicle_id] = max(1, self.vehicle_priorities[vehicle_id])
+    
+    def create_ecbs_mission_template(self, template_id, loading_point=None, unloading_point=None):
+        """创建带有ECBS特性的任务模板"""
+        # 首先创建基本任务模板
+        if not super().create_mission_template(template_id, loading_point, unloading_point):
+            return False
+        
+        # 增强任务优先级设置
+        template = self.mission_templates[template_id]
+        
+        # 调整任务优先级 - 采用更细致的优先级策略
+        for i, task in enumerate(template):
+            if task['task_type'] == 'to_loading':
+                task['priority'] = 2  # 前往装载点优先级中等
+            elif task['task_type'] == 'to_unloading':
+                task['priority'] = 3  # 前往卸载点优先级高(满载)
+            elif task['task_type'] == 'to_initial':
+                task['priority'] = 1  # 返回起点优先级低
+        
+        return True
+    
+    def assign_mission(self, vehicle_id, template_id):
+        """以ECBS感知方式分配任务"""
+        # 首先尝试常规分配
+        if not super().assign_mission(vehicle_id, template_id):
+            return False
+        
+        # 如果成功分配，更新任务优先级
+        current_prio = self.vehicle_priorities.get(vehicle_id, 1)
+        
+        # 获取车辆的任务队列
+        if vehicle_id in self.task_queues:
+            for task_id in self.task_queues[vehicle_id]:
+                if task_id in self.tasks:
+                    # 将车辆优先级融入任务优先级
+                    self.tasks[task_id].priority *= current_prio / 10.0
+                    # 保存到任务优先级字典
+                    self.task_priorities[task_id] = self.tasks[task_id].priority
+        
+        # 如果当前车辆空闲，尝试规划初始路径
+        if self.vehicle_statuses[vehicle_id]['status'] == 'idle':
+            # 已经通过super().assign_mission中的_start_next_task启动了任务
+            # 现在需要确保路径规划适当考虑了ECBS
+            task_id = self.vehicle_statuses[vehicle_id]['current_task']
+            
+            if task_id in self.tasks and self.tasks[task_id].path:
+                # 向交通管理器注册路径
+                if self.traffic_manager:
+                    self.traffic_manager.register_vehicle_path(
+                        vehicle_id,
+                        self.tasks[task_id].path,
+                        self.env.current_time if hasattr(self.env, 'current_time') else 0
+                    )
+        
+        return True
+    
+    def _complete_task(self, vehicle_id, task_id):
+        """完成任务并更新统计信息，添加ECBS相关处理"""
+        # 首先调用原始方法
+        super()._complete_task(vehicle_id, task_id)
+        
+        # 释放交通管理器中的路径
+        if self.traffic_manager:
+            self.traffic_manager.release_vehicle_path(vehicle_id)
+        
+        # 根据任务完成情况调整车辆优先级
+        if vehicle_id in self.conflict_counts:
+            conflicts = self.conflict_counts[vehicle_id]
+            
+            # 如果没有冲突，小幅提高优先级
+            if conflicts == 0:
+                self.adjust_vehicle_priority(vehicle_id, 0.5)
+            # 如果冲突很多，降低优先级
+            elif conflicts > 5:
+                self.adjust_vehicle_priority(vehicle_id, -1.0)
+            
+            # 重置冲突计数
+            self.conflict_counts[vehicle_id] = 0
+    
+    def _handle_task_completion(self, vehicle_id, task_id):
+        """处理任务完成"""
+        # 在更新状态前释放路径
+        if self.traffic_manager:
+            self.traffic_manager.release_vehicle_path(vehicle_id)
+        
+        # 调用原始处理方法
+        super()._handle_task_completion(vehicle_id, task_id)
+    
+    def get_vehicle_info(self, vehicle_id):
+        """获取车辆详细信息，包括ECBS特有信息"""
+        # 获取基本信息
+        info = super().get_vehicle_info(vehicle_id)
+        
+        if not info:
+            return None
+        
+        # 添加ECBS特有信息
+        info['priority'] = self.vehicle_priorities.get(vehicle_id, 1)
+        info['conflict_count'] = self.conflict_counts.get(vehicle_id, 0)
+        
+        # 获取潜在的冲突信息
+        if self.traffic_manager and vehicle_id in self.vehicle_statuses:
+            status = self.vehicle_statuses[vehicle_id]
+            if status['current_task'] and status['current_task'] in self.tasks:
+                task = self.tasks[status['current_task']]
+                if task.path:
+                    # 简化的冲突检测
+                    conflicts = []
+                    for other_id in self.vehicle_statuses:
+                        if other_id != vehicle_id:
+                            other_status = self.vehicle_statuses[other_id]
+                            if other_status['current_task'] and other_status['current_task'] in self.tasks:
+                                other_task = self.tasks[other_status['current_task']]
+                                if other_task.path:
+                                    # 检查两个路径是否有潜在冲突
+                                    conflict = self.traffic_manager.conflict_detector.check_path_conflict(
+                                        vehicle_id, task.path,
+                                        other_id, other_task.path
+                                    )
+                                    if conflict:
+                                        conflicts.append({
+                                            'with_vehicle': other_id,
+                                            'location': conflict.location,
+                                            'time': conflict.time_step
+                                        })
+                    
+                    info['potential_conflicts'] = conflicts
+        
+        return info
