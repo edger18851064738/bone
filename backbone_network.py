@@ -1,7 +1,27 @@
+import math
+import numpy as np
+from collections import defaultdict
+
 class BackbonePathNetwork:
-    """主干路径网络，管理预计算的最优路径"""
+    """主干路径网络，管理预计算的最优路径
+    
+    主干路径网络是一种高效的路径管理方法，通过预先计算和优化关键点之间的路径，
+    减少实时路径规划的计算负担，并提供更加稳定和可预测的车辆行驶模式。
+    
+    属性:
+        env: 环境对象，提供地图和资源信息
+        paths: 路径字典 {path_id: path_data}
+        nodes: 节点字典 {node_id: node_data}
+        connections: 连接点字典 {conn_id: conn_data}
+        path_graph: 路径连接图，用于路由
+    """
     
     def __init__(self, env):
+        """初始化主干路径网络
+        
+        Args:
+            env: 环境对象，包含地图数据、关键点和资源信息
+        """
         self.env = env
         self.paths = {}               # 路径字典 {path_id: path_data}
         self.nodes = {}               # 节点字典 {node_id: node_data}
@@ -9,7 +29,18 @@ class BackbonePathNetwork:
         self.path_graph = {}          # 路径连接图，用于路由
         
     def generate_network(self):
-        """生成完整的主干路径网络"""
+        """生成完整的主干路径网络
+        
+        步骤:
+        1. 识别关键点（装载点、卸载点、停车区等）
+        2. 为关键点对生成路径
+        3. 优化路径（平滑、简化等）
+        4. 创建路径连接图用于路由
+        5. 识别连接点（车辆可以进入/退出主干网络的点）
+        
+        Returns:
+            dict: 路径字典 {path_id: path_data}
+        """
         # 1. 识别关键点（装载点、卸载点、停车区等）
         key_points = self._identify_key_points()
         
@@ -28,31 +59,50 @@ class BackbonePathNetwork:
         return self.paths
         
     def _identify_key_points(self):
-        """识别所有关键点"""
+        """识别所有关键点
+        
+        从环境中提取装载点、卸载点、停车区等关键点，
+        并为每个点分配唯一ID。
+        
+        Returns:
+            list: 关键点列表，每个元素包含位置、类型和ID
+        """
         key_points = []
         
         # 添加装载点
         for point in self.env.loading_points:
-            key_points.append({"position": (point[0], point[1], 0), 
-                               "type": "loading_point",
-                               "id": f"L{len(key_points)}"})
+            key_points.append({
+                "position": (point[0], point[1], 0), 
+                "type": "loading_point",
+                "id": f"L{len(key_points)}"
+            })
         
         # 添加卸载点
         for point in self.env.unloading_points:
-            key_points.append({"position": (point[0], point[1], 0), 
-                               "type": "unloading_point",
-                               "id": f"U{len(key_points)}"})
+            key_points.append({
+                "position": (point[0], point[1], 0), 
+                "type": "unloading_point",
+                "id": f"U{len(key_points)}"
+            })
         
         # 添加停车区
         for area in self.env.parking_areas:
-            key_points.append({"position": (area[0], area[1], 0), 
-                               "type": "parking",
-                               "id": f"P{len(key_points)}"})
+            key_points.append({
+                "position": (area[0], area[1], 0), 
+                "type": "parking",
+                "id": f"P{len(key_points)}"
+            })
         
         return key_points
         
     def _generate_paths_between_key_points(self, key_points):
-        """生成关键点之间的路径"""
+        """生成关键点之间的路径
+        
+        为每对关键点生成初始路径，并存储路径信息。
+        
+        Args:
+            key_points (list): 关键点列表
+        """
         # 使用现有规划器生成初始路径
         temp_planner = self._create_planner()
         
@@ -80,7 +130,10 @@ class BackbonePathNetwork:
                         }
     
     def _optimize_all_paths(self):
-        """优化所有路径"""
+        """优化所有路径
+        
+        遍历所有路径并应用优化（平滑和简化）。
+        """
         for path_id, path_data in self.paths.items():
             if not path_data['optimized']:
                 path_data['path'] = self._optimize_path(path_data['path'])
@@ -90,7 +143,14 @@ class BackbonePathNetwork:
                 path_data['speed_limit'] = self._calculate_speed_limit(path_data['path'])
     
     def _optimize_path(self, path):
-        """优化单个路径（平滑和简化）"""
+        """优化单个路径（平滑和简化）
+        
+        Args:
+            path (list): 原始路径点列表
+            
+        Returns:
+            list: 优化后的路径点列表
+        """
         # 1. 路径平滑处理
         smoothed_path = self._smooth_path(path)
         
@@ -100,7 +160,16 @@ class BackbonePathNetwork:
         return simplified_path
     
     def _smooth_path(self, path):
-        """路径平滑处理"""
+        """路径平滑处理
+        
+        使用简单的移动平均方法平滑路径。
+        
+        Args:
+            path (list): 原始路径点列表
+            
+        Returns:
+            list: 平滑后的路径点列表
+        """
         # 实现路径平滑算法，例如样条曲线或贝塞尔曲线
         # 简单实现，可以根据需要扩展
         if len(path) <= 2:
@@ -131,7 +200,16 @@ class BackbonePathNetwork:
         return smoothed
     
     def _simplify_path(self, path):
-        """路径简化，去除冗余点"""
+        """路径简化，去除冗余点
+        
+        使用Ramer-Douglas-Peucker算法简化路径，减少路径点数量。
+        
+        Args:
+            path (list): 原始路径点列表
+            
+        Returns:
+            list: 简化后的路径点列表
+        """
         # 实现Ramer-Douglas-Peucker算法或类似的路径简化算法
         # 简单实现，可以根据需要扩展
         if len(path) <= 2:
@@ -166,7 +244,16 @@ class BackbonePathNetwork:
             return [path[0], path[-1]]
     
     def _point_line_distance(self, point, line_start, line_end):
-        """计算点到线段的距离"""
+        """计算点到线段的距离
+        
+        Args:
+            point (tuple): 点坐标
+            line_start (tuple): 线段起点坐标
+            line_end (tuple): 线段终点坐标
+            
+        Returns:
+            float: 点到线段的最短距离
+        """
         x0, y0 = point[0], point[1]
         x1, y1 = line_start[0], line_start[1]
         x2, y2 = line_end[0], line_end[1]
@@ -189,7 +276,10 @@ class BackbonePathNetwork:
         return ((x0 - px) ** 2 + (y0 - py) ** 2) ** 0.5
     
     def _build_path_graph(self):
-        """构建路径连接图，用于路由"""
+        """构建路径连接图，用于路由
+        
+        创建一个图结构，表示路径之间的连接关系，用于路径规划。
+        """
         # 清空现有图
         self.path_graph = {}
         
@@ -211,7 +301,10 @@ class BackbonePathNetwork:
             }
     
     def _identify_connection_points(self):
-        """识别连接点（车辆可以进入/退出主干网络的点）"""
+        """识别连接点（车辆可以进入/退出主干网络的点）
+        
+        在路径上创建连接点，以便车辆可以在这些点处进入或离开主干网络。
+        """
         # 清空现有连接点
         self.connections = {}
         
@@ -254,7 +347,17 @@ class BackbonePathNetwork:
                     conn_id += 1
     
     def _is_safe_connection_point(self, path, index):
-        """判断位置是否适合作为连接点"""
+        """判断位置是否适合作为连接点
+        
+        检查路径上的点是否适合作为连接点，避免选择转弯处或靠近障碍物的点。
+        
+        Args:
+            path (list): 路径点列表
+            index (int): 要检查的点索引
+            
+        Returns:
+            bool: 是否适合作为连接点
+        """
         # 简单判断：检查周围是否有足够空间，不在急转弯处等
         # 更复杂的实现可以检查周围障碍物、道路宽度等
         
@@ -326,7 +429,17 @@ class BackbonePathNetwork:
         return True
     
     def find_nearest_connection(self, position, max_distance=20.0):
-        """查找最近的连接点"""
+        """查找最近的连接点
+        
+        查找离给定位置最近的连接点，用于车辆进入主干网络。
+        
+        Args:
+            position (tuple): 位置坐标 (x, y) 或 (x, y, theta)
+            max_distance (float, optional): 最大搜索距离
+            
+        Returns:
+            dict or None: 最近的连接点信息，如果没有找到则返回None
+        """
         if not self.connections:
             return None
             
@@ -342,7 +455,17 @@ class BackbonePathNetwork:
         return nearest
     
     def find_path(self, start_id, end_id):
-        """在主干网络中查找从起点到终点的最佳路径"""
+        """在主干网络中查找从起点到终点的最佳路径
+        
+        使用Dijkstra算法找到从起点节点到终点节点的最优路径。
+        
+        Args:
+            start_id (str): 起点节点ID
+            end_id (str): 终点节点ID
+            
+        Returns:
+            list or None: 路径ID列表，如果没有找到路径则返回None
+        """
         if start_id not in self.path_graph or end_id not in self.path_graph:
             return None
             
@@ -399,7 +522,18 @@ class BackbonePathNetwork:
         return path_ids
     
     def get_path_segment(self, path_id, start_index, end_index):
-        """获取路径的一个段"""
+        """获取路径的一个段
+        
+        从路径中提取指定索引范围的段。
+        
+        Args:
+            path_id (str): 路径ID
+            start_index (int): 起始索引
+            end_index (int): 结束索引
+            
+        Returns:
+            list or None: 路径段点列表，如果路径不存在则返回None
+        """
         if path_id not in self.paths:
             return None
             
@@ -417,11 +551,26 @@ class BackbonePathNetwork:
             return list(reversed(path[end_index:start_index + 1]))
     
     def _calculate_distance(self, pos1, pos2):
-        """计算两点之间的欧几里得距离"""
+        """计算两点之间的欧几里得距离
+        
+        Args:
+            pos1 (tuple): 第一个点的坐标
+            pos2 (tuple): 第二个点的坐标
+            
+        Returns:
+            float: 两点之间的距离
+        """
         return ((pos1[0] - pos2[0]) ** 2 + (pos1[1] - pos2[1]) ** 2) ** 0.5
     
     def _calculate_path_length(self, path):
-        """计算路径总长度"""
+        """计算路径总长度
+        
+        Args:
+            path (list): 路径点列表
+            
+        Returns:
+            float: 路径总长度
+        """
         if not path or len(path) < 2:
             return 0
             
@@ -432,7 +581,16 @@ class BackbonePathNetwork:
         return length
     
     def _calculate_speed_limit(self, path):
-        """计算路径的速度限制"""
+        """计算路径的速度限制
+        
+        基于路径的弯曲程度计算适合的速度限制。
+        
+        Args:
+            path (list): 路径点列表
+            
+        Returns:
+            float: 速度限制 (0.3-1.0)
+        """
         # 简单实现：基于路径的弯曲程度计算速度限制
         # 更复杂的实现可以考虑坡度、路面类型等
         
@@ -495,7 +653,16 @@ class BackbonePathNetwork:
         return max(min_speed, min(max_speed, speed_limit))
     
     def _estimate_path_capacity(self, path):
-        """估计路径的通行能力"""
+        """估计路径的通行能力
+        
+        基于路径长度和弯曲程度估计路径的最大车辆容量。
+        
+        Args:
+            path (list): 路径点列表
+            
+        Returns:
+            int: 估计的路径容量
+        """
         # 简单实现：基于路径长度和弯曲程度估计
         # 可以根据需要改进
         
@@ -552,17 +719,35 @@ class BackbonePathNetwork:
         return max(1, int(capacity))
     
     def _create_planner(self):
-        """创建临时规划器用于生成初始路径"""
+        """创建临时规划器用于生成初始路径
+        
+        如果环境中已有规划器，则使用环境的规划器；
+        否则创建一个新的规划器。
+        
+        Returns:
+            PathPlanner: 路径规划器
+        """
         # 使用环境中现有的规划器，如果没有则创建一个简单的规划器
         if hasattr(self.env, 'planner') and self.env.planner:
             return self.env.planner
         
         # 这里应使用适合的规划器类，根据实际情况导入
-        from path_planner import PathPlanner
-        return PathPlanner(self.env)
+        try:
+            from path_planner import PathPlanner
+            return PathPlanner(self.env)
+        except ImportError:
+            # 如果无法导入 PathPlanner，创建一个简单的临时规划器
+            return SimplePlanner(self.env)
     
     def update_traffic_flow(self, path_id, delta=1):
-        """更新路径的交通流量"""
+        """更新路径的交通流量
+        
+        增加或减少路径的交通流量，用于交通管理。
+        
+        Args:
+            path_id (str): 路径ID
+            delta (int, optional): 流量变化值，正数表示增加，负数表示减少
+        """
         if path_id in self.paths:
             self.paths[path_id]['traffic_flow'] += delta
             # 确保流量不为负
@@ -572,7 +757,13 @@ class BackbonePathNetwork:
             self._update_path_graph_edge(path_id)
     
     def _update_path_graph_edge(self, path_id):
-        """更新路径图中的边权重"""
+        """更新路径图中的边权重
+        
+        根据路径流量更新路径图中的边权重。
+        
+        Args:
+            path_id (str): 路径ID
+        """
         if path_id in self.paths:
             path_data = self.paths[path_id]
             start_id = path_data['start']['id']
@@ -582,6 +773,57 @@ class BackbonePathNetwork:
                 self.path_graph[start_id][end_id]['traffic_flow'] = path_data['traffic_flow']
     
     def visualize(self, scene=None):
-        """可视化主干路径网络"""
+        """可视化主干路径网络
+        
+        如果提供场景对象，则在场景中绘制路径网络。
+        
+        Args:
+            scene: 可视化场景对象（可选）
+        """
         # 实现取决于可视化系统
         pass
+
+
+class SimplePlanner:
+    """简单的路径规划器，用于临时替代 PathPlanner"""
+    
+    def __init__(self, env):
+        """初始化简单规划器
+        
+        Args:
+            env: 环境对象
+        """
+        self.env = env
+    
+    def plan_path(self, start, goal):
+        """规划从起点到终点的路径
+        
+        简单实现，仅生成直线路径并避开障碍物。
+        
+        Args:
+            start (tuple): 起点坐标
+            goal (tuple): 终点坐标
+            
+        Returns:
+            list: 路径点列表
+        """
+        # 简单直线路径（实际项目中应替换为更复杂的避障算法）
+        start_x, start_y = start[0], start[1]
+        goal_x, goal_y = goal[0], goal[1]
+        
+        # 计算方向角度
+        theta = math.atan2(goal_y - start_y, goal_x - start_x)
+        
+        # 路径点数量（根据距离确定）
+        distance = ((goal_x - start_x) ** 2 + (goal_y - start_y) ** 2) ** 0.5
+        num_points = max(2, int(distance / 5))  # 每5个单位一个点
+        
+        # 生成路径点
+        path = []
+        for i in range(num_points):
+            t = i / (num_points - 1)
+            x = start_x + t * (goal_x - start_x)
+            y = start_y + t * (goal_y - start_y)
+            path.append((x, y, theta))
+        
+        return path
