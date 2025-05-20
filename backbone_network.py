@@ -1,6 +1,7 @@
 import math
 import numpy as np
 from collections import defaultdict
+from RRT import RRTPlanner  # Import the RRTPlanner class
 
 class BackbonePathNetwork:
     """主干路径网络，管理预计算的最优路径
@@ -27,6 +28,9 @@ class BackbonePathNetwork:
         self.nodes = {}               # 节点字典 {node_id: node_data}
         self.connections = {}         # 连接点字典 {conn_id: conn_data}
         self.path_graph = {}          # 路径连接图，用于路由
+        
+        # 规划器缓存
+        self.planner = None
         
     def generate_network(self):
         """生成完整的主干路径网络
@@ -126,8 +130,9 @@ class BackbonePathNetwork:
         Args:
             key_points (list): 关键点列表
         """
-        # 使用现有规划器生成初始路径
-        temp_planner = self._create_planner()
+        # 使用RRT规划器生成初始路径
+        if not self.planner:
+            self.planner = self._create_planner()
         
         for i, start_point in enumerate(key_points):
             for j, end_point in enumerate(key_points):
@@ -136,8 +141,9 @@ class BackbonePathNetwork:
                     end_pos = end_point["position"]
                     path_id = f"{start_point['id']}_{end_point['id']}"
                     
-                    # 使用现有规划器生成初始路径
-                    path = temp_planner.plan_path(start_pos, end_pos)
+                    # 使用RRT规划器生成初始路径
+                    print(f"规划路径: {path_id} (从 {start_point['id']} 到 {end_point['id']})")
+                    path = self.planner.plan_path(start_pos, end_pos, max_iterations=6000)
                     
                     if path:
                         # 存储路径信息
@@ -151,6 +157,9 @@ class BackbonePathNetwork:
                             'speed_limit': self._calculate_speed_limit(path),
                             'optimized': False  # 标记为未优化
                         }
+                        print(f"  路径规划成功，路径长度: {len(path)}")
+                    else:
+                        print(f"  路径规划失败: {path_id}")
     
     def _optimize_all_paths(self):
         """优化所有路径
@@ -777,20 +786,40 @@ class BackbonePathNetwork:
         return max(1, int(capacity))
     
     def _create_planner(self):
-        """创建临时规划器用于生成初始路径
+        """创建RRT规划器用于生成初始路径
         
-        如果环境中已有规划器，则使用环境的规划器；
-        否则创建一个新的规划器。
+        使用双向RRT算法进行路径规划。
         
         Returns:
-            PathPlanner: 路径规划器
+            RRTPlanner: 路径规划器
         """
-        # 使用环境中现有的规划器，如果没有则创建一个简单的规划器
-        if hasattr(self.env, 'planner') and self.env.planner:
-            return self.env.planner
+        # 创建双向RRT规划器
+        planner = RRTPlanner(
+            self.env, 
+            vehicle_length=6.0,  # 默认车辆长度
+            vehicle_width=3.0,   # 默认车辆宽度
+            turning_radius=8.0,  # 最小转弯半径
+            step_size=0.8,       # 步长
+            grid_resolution=0.3  # 网格分辨率
+        )
         
-        # 创建简单规划器
-        return SimplePlanner(self.env)
+        # 启用调试标志以便输出更多信息
+        planner.debug = False
+        
+        # 设置规划参数
+        planner.bidirectional_rrt.max_steer = math.pi/4
+        planner.bidirectional_rrt.goal_bias = 0.2
+        
+        # 启用路径优化
+        planner.path_smoothing = True
+        planner.smoothing_params = {
+            'min_segment_length': 4,    # 最小线段长度
+            'max_error': 1.0,           # 最大误差
+            'angle_threshold': 0.3,     # 转弯角度阈值
+            'turn_optimization_iters': 3 # 转弯优化迭代次数
+        }
+        
+        return planner
     
     def update_traffic_flow(self, path_id, delta=1):
         """更新路径的交通流量
@@ -835,7 +864,6 @@ class BackbonePathNetwork:
         """
         # 实现取决于可视化系统
         pass
-
 
 class SimplePlanner:
     """简单的路径规划器，用于临时替代 PathPlanner"""
@@ -882,3 +910,33 @@ class SimplePlanner:
             path.append((x, y, theta))
         
         return path
+
+def test_backbone_network():
+    # Create test environment
+    from environment import OpenPitMineEnv
+    
+    env = OpenPitMineEnv(width=500, height=500)
+    
+    # Add obstacles
+    env.add_obstacle(100, 100, 50, 50)
+    env.add_obstacle(300, 200, 80, 30)
+    
+    # Add key points
+    env.add_loading_point((50, 50))
+    env.add_unloading_point((450, 450))
+    
+    # Create and generate backbone network
+    backbone = BackbonePathNetwork(env)
+    backbone.generate_network()
+    
+    # Check if paths were generated
+    print(f"Generated {len(backbone.paths)} paths")
+    print(f"Created {len(backbone.connections)} connection points")
+    
+    # Visualize if needed
+    backbone.visualize()
+    
+    return backbone
+
+if __name__ == "__main__":
+    test_backbone_network()
