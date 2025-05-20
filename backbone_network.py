@@ -70,30 +70,53 @@ class BackbonePathNetwork:
         key_points = []
         
         # 添加装载点
-        for point in self.env.loading_points:
+        for i, point in enumerate(self.env.loading_points):
+            pos = self._ensure_3d_point(point)
             key_points.append({
-                "position": (point[0], point[1], 0), 
+                "position": pos, 
                 "type": "loading_point",
-                "id": f"L{len(key_points)}"
+                "id": f"L{i}"
             })
         
         # 添加卸载点
-        for point in self.env.unloading_points:
+        for i, point in enumerate(self.env.unloading_points):
+            pos = self._ensure_3d_point(point)
             key_points.append({
-                "position": (point[0], point[1], 0), 
+                "position": pos, 
                 "type": "unloading_point",
-                "id": f"U{len(key_points)}"
+                "id": f"U{i}"
             })
         
         # 添加停车区
-        for area in self.env.parking_areas:
+        for i, point in enumerate(getattr(self.env, 'parking_areas', [])):
+            pos = self._ensure_3d_point(point)
             key_points.append({
-                "position": (area[0], area[1], 0), 
+                "position": pos, 
                 "type": "parking",
-                "id": f"P{len(key_points)}"
+                "id": f"P{i}"
             })
         
         return key_points
+    
+    def _ensure_3d_point(self, point):
+        """确保点坐标有三个元素 (x, y, theta)
+        
+        Args:
+            point: 原始点坐标
+            
+        Returns:
+            tuple: 三元组 (x, y, theta)
+        """
+        if not point:
+            return (0, 0, 0)
+            
+        if len(point) >= 3:
+            return (point[0], point[1], point[2])
+        elif len(point) == 2:
+            return (point[0], point[1], 0)
+        else:
+            # 处理异常情况
+            return (0, 0, 0)
         
     def _generate_paths_between_key_points(self, key_points):
         """生成关键点之间的路径
@@ -151,6 +174,9 @@ class BackbonePathNetwork:
         Returns:
             list: 优化后的路径点列表
         """
+        if not path or len(path) < 2:
+            return path
+            
         # 1. 路径平滑处理
         smoothed_path = self._smooth_path(path)
         
@@ -210,8 +236,6 @@ class BackbonePathNetwork:
         Returns:
             list: 简化后的路径点列表
         """
-        # 实现Ramer-Douglas-Peucker算法或类似的路径简化算法
-        # 简单实现，可以根据需要扩展
         if len(path) <= 2:
             return path
             
@@ -314,6 +338,9 @@ class BackbonePathNetwork:
         for path_id, path_data in self.paths.items():
             path = path_data['path']
             
+            if not path or len(path) < 2:
+                continue
+            
             # 起点和终点都是连接点
             self.connections[f"conn_{conn_id}"] = {
                 'position': path[0],
@@ -358,9 +385,6 @@ class BackbonePathNetwork:
         Returns:
             bool: 是否适合作为连接点
         """
-        # 简单判断：检查周围是否有足够空间，不在急转弯处等
-        # 更复杂的实现可以检查周围障碍物、道路宽度等
-        
         # 检查是否在转弯处
         if index > 0 and index < len(path) - 1:
             prev = path[index - 1]
@@ -370,8 +394,8 @@ class BackbonePathNetwork:
             # 计算方向变化
             if len(curr) > 2:
                 # 如果路径点包含方向信息
-                prev_theta = prev[2]
-                next_theta = next_p[2]
+                prev_theta = prev[2] if len(prev) > 2 else 0
+                next_theta = next_p[2] if len(next_p) > 2 else 0
                 
                 # 计算角度差，判断是否为急转弯
                 angle_diff = abs((next_theta - prev_theta + math.pi) % (2 * math.pi) - math.pi)
@@ -387,7 +411,7 @@ class BackbonePathNetwork:
                 dy2 = next_p[1] - curr[1]
                 
                 # 计算夹角余弦值
-                if dx1 == 0 and dy1 == 0 or dx2 == 0 and dy2 == 0:
+                if (dx1 == 0 and dy1 == 0) or (dx2 == 0 and dy2 == 0):
                     return False  # 避免除零错误
                     
                 dot_product = dx1 * dx2 + dy1 * dy2
@@ -418,15 +442,40 @@ class BackbonePathNetwork:
                     check_y = int(y + dy * d)
                     
                     # 检查是否超出地图范围
-                    if (check_x < 0 or check_x >= self.env.width or
-                        check_y < 0 or check_y >= self.env.height):
+                    if not self._is_valid_grid_position(check_x, check_y):
                         continue
                     
                     # 检查是否为障碍物
-                    if self.env.grid[check_x, check_y] == 1:
+                    if self._is_obstacle(check_x, check_y):
                         return False  # 太靠近障碍物
         
         return True
+    
+    def _is_valid_grid_position(self, x, y):
+        """检查位置是否在网格范围内
+        
+        Args:
+            x, y: 位置坐标
+            
+        Returns:
+            bool: 是否在有效范围内
+        """
+        return (0 <= x < self.env.width and 0 <= y < self.env.height)
+    
+    def _is_obstacle(self, x, y):
+        """检查位置是否为障碍物
+        
+        Args:
+            x, y: 位置坐标
+            
+        Returns:
+            bool: 是否为障碍物
+        """
+        try:
+            return self.env.grid[x, y] == 1
+        except (IndexError, AttributeError):
+            # 如果出现索引错误或属性错误，安全返回
+            return False
     
     def find_nearest_connection(self, position, max_distance=20.0):
         """查找最近的连接点
@@ -499,7 +548,7 @@ class BackbonePathNetwork:
                     previous[neighbor] = current
         
         # 重建路径
-        if previous[end_id] is None:
+        if end_id not in previous or previous[end_id] is None:
             return None  # 没有找到路径
             
         # 构建节点ID序列
@@ -539,6 +588,9 @@ class BackbonePathNetwork:
             
         path = self.paths[path_id]['path']
         
+        if not path:
+            return None
+            
         # 确保索引有效
         start_index = max(0, min(start_index, len(path) - 1))
         end_index = max(0, min(end_index, len(path) - 1))
@@ -560,7 +612,13 @@ class BackbonePathNetwork:
         Returns:
             float: 两点之间的距离
         """
-        return ((pos1[0] - pos2[0]) ** 2 + (pos1[1] - pos2[1]) ** 2) ** 0.5
+        # 确保坐标至少有x,y两个值
+        x1 = pos1[0] if len(pos1) > 0 else 0
+        y1 = pos1[1] if len(pos1) > 1 else 0
+        x2 = pos2[0] if len(pos2) > 0 else 0
+        y2 = pos2[1] if len(pos2) > 1 else 0
+        
+        return ((x1 - x2) ** 2 + (y1 - y2) ** 2) ** 0.5
     
     def _calculate_path_length(self, path):
         """计算路径总长度
@@ -613,7 +671,7 @@ class BackbonePathNetwork:
             dy2 = next_p[1] - curr[1]
             
             # 计算角度变化（使用点积和叉积）
-            if dx1 == 0 and dy1 == 0 or dx2 == 0 and dy2 == 0:
+            if (dx1 == 0 and dy1 == 0) or (dx2 == 0 and dy2 == 0):
                 continue  # 跳过重合点
                 
             # 归一化向量
@@ -692,7 +750,7 @@ class BackbonePathNetwork:
                 dx2 = next_p[0] - curr[0]
                 dy2 = next_p[1] - curr[1]
                 
-                if dx1 == 0 and dy1 == 0 or dx2 == 0 and dy2 == 0:
+                if (dx1 == 0 and dy1 == 0) or (dx2 == 0 and dy2 == 0):
                     continue
                 
                 # 计算夹角余弦值
@@ -731,13 +789,8 @@ class BackbonePathNetwork:
         if hasattr(self.env, 'planner') and self.env.planner:
             return self.env.planner
         
-        # 这里应使用适合的规划器类，根据实际情况导入
-        try:
-            from path_planner import PathPlanner
-            return PathPlanner(self.env)
-        except ImportError:
-            # 如果无法导入 PathPlanner，创建一个简单的临时规划器
-            return SimplePlanner(self.env)
+        # 创建简单规划器
+        return SimplePlanner(self.env)
     
     def update_traffic_flow(self, path_id, delta=1):
         """更新路径的交通流量
@@ -807,9 +860,11 @@ class SimplePlanner:
         Returns:
             list: 路径点列表
         """
-        # 简单直线路径（实际项目中应替换为更复杂的避障算法）
-        start_x, start_y = start[0], start[1]
-        goal_x, goal_y = goal[0], goal[1]
+        # 提取坐标
+        start_x = start[0] if len(start) > 0 else 0
+        start_y = start[1] if len(start) > 1 else 0
+        goal_x = goal[0] if len(goal) > 0 else 0
+        goal_y = goal[1] if len(goal) > 1 else 0
         
         # 计算方向角度
         theta = math.atan2(goal_y - start_y, goal_x - start_x)
