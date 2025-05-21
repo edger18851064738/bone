@@ -1,7 +1,6 @@
 import math
 import numpy as np
 from collections import defaultdict
-from RRT import RRTPlanner  # Import the RRTPlanner class
 
 class BackbonePathNetwork:
     """主干路径网络，管理预计算的最优路径
@@ -13,7 +12,6 @@ class BackbonePathNetwork:
         env: 环境对象，提供地图和资源信息
         paths: 路径字典 {path_id: path_data}
         nodes: 节点字典 {node_id: node_data}
-        connections: 连接点字典 {conn_id: conn_data}
         path_graph: 路径连接图，用于路由
     """
     
@@ -26,12 +24,11 @@ class BackbonePathNetwork:
         self.env = env
         self.paths = {}               # 路径字典 {path_id: path_data}
         self.nodes = {}               # 节点字典 {node_id: node_data}
-        self.connections = {}         # 连接点字典 {conn_id: conn_data}
         self.path_graph = {}          # 路径连接图，用于路由
         
         # 规划器缓存
         self.planner = None
-        
+    
     def generate_network(self):
         """生成完整的主干路径网络
         
@@ -40,7 +37,6 @@ class BackbonePathNetwork:
         2. 为关键点对生成路径
         3. 优化路径（平滑、简化等）
         4. 创建路径连接图用于路由
-        5. 识别连接点（车辆可以进入/退出主干网络的点）
         
         Returns:
             dict: 路径字典 {path_id: path_data}
@@ -57,16 +53,13 @@ class BackbonePathNetwork:
         # 4. 创建路径连接图用于路由
         self._build_path_graph()
         
-        # 5. 识别连接点（车辆可以进入/退出主干网络的点）
-        self._identify_connection_points()
-        
         return self.paths
         
     def _identify_key_points(self):
-        """Identify all key points"""
+        """识别所有关键点"""
         key_points = []
         
-        # Add loading points
+        # 添加装载点
         for i, point in enumerate(self.env.loading_points):
             pos = self._ensure_3d_point(point)
             key_points.append({
@@ -75,7 +68,7 @@ class BackbonePathNetwork:
                 "id": f"L{i}"
             })
         
-        # Add unloading points
+        # 添加卸载点
         for i, point in enumerate(self.env.unloading_points):
             pos = self._ensure_3d_point(point)
             key_points.append({
@@ -84,7 +77,7 @@ class BackbonePathNetwork:
                 "id": f"U{i}"
             })
         
-        # Add parking areas - ensure we're accessing them correctly
+        # 添加停车区 - 确保正确访问
         parking_areas = getattr(self.env, 'parking_areas', [])
         for i, point in enumerate(parking_areas):
             pos = self._ensure_3d_point(point)
@@ -94,22 +87,15 @@ class BackbonePathNetwork:
                 "id": f"P{i}"
             })
         
-        # Print debug info to verify points are found
-        print(f"Identified {len(key_points)} key points:")
+        # 打印调试信息以验证点是否找到
+        print(f"识别到 {len(key_points)} 个关键点:")
         for kp in key_points:
             print(f"  {kp['id']} ({kp['type']}): {kp['position']}")
         
         return key_points
     
     def _ensure_3d_point(self, point):
-        """确保点坐标有三个元素 (x, y, theta)
-        
-        Args:
-            point: 原始点坐标
-            
-        Returns:
-            tuple: 三元组 (x, y, theta)
-        """
+        """确保点坐标有三个元素 (x, y, theta)"""
         if not point:
             return (0, 0, 0)
             
@@ -122,13 +108,7 @@ class BackbonePathNetwork:
             return (0, 0, 0)
         
     def _generate_paths_between_key_points(self, key_points):
-        """生成关键点之间的路径
-        
-        为每对关键点生成初始路径，并存储路径信息。
-        
-        Args:
-            key_points (list): 关键点列表
-        """
+        """生成关键点之间的路径"""
         # 使用RRT规划器生成初始路径
         if not self.planner:
             self.planner = self._create_planner()
@@ -161,10 +141,7 @@ class BackbonePathNetwork:
                         print(f"  路径规划失败: {path_id}")
     
     def _optimize_all_paths(self):
-        """优化所有路径
-        
-        遍历所有路径并应用优化（平滑和简化）。
-        """
+        """优化所有路径"""
         for path_id, path_data in self.paths.items():
             if not path_data['optimized']:
                 path_data['path'] = self._optimize_path(path_data['path'])
@@ -174,14 +151,7 @@ class BackbonePathNetwork:
                 path_data['speed_limit'] = self._calculate_speed_limit(path_data['path'])
     
     def _optimize_path(self, path):
-        """优化单个路径（平滑和简化）
-        
-        Args:
-            path (list): 原始路径点列表
-            
-        Returns:
-            list: 优化后的路径点列表
-        """
+        """优化单个路径（平滑和简化）"""
         if not path or len(path) < 2:
             return path
             
@@ -194,18 +164,7 @@ class BackbonePathNetwork:
         return simplified_path
     
     def _smooth_path(self, path):
-        """路径平滑处理
-        
-        使用简单的移动平均方法平滑路径。
-        
-        Args:
-            path (list): 原始路径点列表
-            
-        Returns:
-            list: 平滑后的路径点列表
-        """
-        # 实现路径平滑算法，例如样条曲线或贝塞尔曲线
-        # 简单实现，可以根据需要扩展
+        """路径平滑处理，使用简单的移动平均法"""
         if len(path) <= 2:
             return path
             
@@ -235,14 +194,7 @@ class BackbonePathNetwork:
     
     def _simplify_path(self, path):
         """路径简化，去除冗余点
-        
         使用Ramer-Douglas-Peucker算法简化路径，减少路径点数量。
-        
-        Args:
-            path (list): 原始路径点列表
-            
-        Returns:
-            list: 简化后的路径点列表
         """
         if len(path) <= 2:
             return path
@@ -276,16 +228,7 @@ class BackbonePathNetwork:
             return [path[0], path[-1]]
     
     def _point_line_distance(self, point, line_start, line_end):
-        """计算点到线段的距离
-        
-        Args:
-            point (tuple): 点坐标
-            line_start (tuple): 线段起点坐标
-            line_end (tuple): 线段终点坐标
-            
-        Returns:
-            float: 点到线段的最短距离
-        """
+        """计算点到线段的距离"""
         x0, y0 = point[0], point[1]
         x1, y1 = line_start[0], line_start[1]
         x2, y2 = line_end[0], line_end[1]
@@ -308,10 +251,7 @@ class BackbonePathNetwork:
         return ((x0 - px) ** 2 + (y0 - py) ** 2) ** 0.5
     
     def _build_path_graph(self):
-        """构建路径连接图，用于路由
-        
-        创建一个图结构，表示路径之间的连接关系，用于路径规划。
-        """
+        """构建路径连接图，用于路由"""
         # 清空现有图
         self.path_graph = {}
         
@@ -332,184 +272,76 @@ class BackbonePathNetwork:
                 'traffic_flow': path_data['traffic_flow']
             }
     
-    def _identify_connection_points(self):
-        """识别连接点（车辆可以进入/退出主干网络的点）
+    # 新增方法：查找骨干路径上最近点
+    def find_nearest_backbone_point(self, position, max_distance=20.0):
+        """查找最靠近给定位置的骨干路径点
         
-        在路径上创建连接点，以便车辆可以在这些点处进入或离开主干网络。
+        Args:
+            position: 位置坐标 (x, y) 或 (x, y, theta)
+            max_distance: 最大搜索距离
+            
+        Returns:
+            dict: {'path_id': path_id, 'path_index': idx, 'position': point, 'distance': distance}
+            或 None (如果没找到)
         """
-        # 清空现有连接点
-        self.connections = {}
+        nearest_info = None
+        min_dist = float('inf')
         
-        conn_id = 0
-        
-        # 对每条主干路径添加连接点
+        # 遍历所有骨干路径点
         for path_id, path_data in self.paths.items():
             path = path_data['path']
             
-            if not path or len(path) < 2:
-                continue
-            
-            # 起点和终点都是连接点
-            self.connections[f"conn_{conn_id}"] = {
-                'position': path[0],
-                'path_id': path_id,
-                'path_index': 0,
-                'type': 'endpoint'
-            }
-            conn_id += 1
-            
-            self.connections[f"conn_{conn_id}"] = {
-                'position': path[-1],
-                'path_id': path_id,
-                'path_index': len(path) - 1,
-                'type': 'endpoint'
-            }
-            conn_id += 1
-            
-            # 每隔一定距离添加中间连接点
-            # 设置合适的间距，避免连接点过多
-            interval = max(1, len(path) // 10)  # 约每条路径10个连接点
-            
-            for i in range(interval, len(path) - interval, interval):
-                # 确保连接点在安全位置（不在转弯处等）
-                if self._is_safe_connection_point(path, i):
-                    self.connections[f"conn_{conn_id}"] = {
-                        'position': path[i],
+            for idx, point in enumerate(path):
+                dist = self._calculate_distance(position, point)
+                if dist < min_dist and dist <= max_distance:
+                    min_dist = dist
+                    nearest_info = {
                         'path_id': path_id,
-                        'path_index': i,
-                        'type': 'midpath'
+                        'path_index': idx,
+                        'position': point,
+                        'distance': dist
                     }
-                    conn_id += 1
-    
-    def _is_safe_connection_point(self, path, index):
-        """判断位置是否适合作为连接点
         
-        检查路径上的点是否适合作为连接点，避免选择转弯处或靠近障碍物的点。
+        return nearest_info
+    
+    # 新增方法：获取可达点
+    def find_accessible_points(self, position, rrt_planner, max_candidates=5, sampling_step=10):
+        """查找可通过RRT从当前位置到达的骨干路径点
         
         Args:
-            path (list): 路径点列表
-            index (int): 要检查的点索引
+            position: 起点位置
+            rrt_planner: RRT路径规划器
+            max_candidates: 最大候选点数
+            sampling_step: 路径采样步长
             
         Returns:
-            bool: 是否适合作为连接点
+            list: 可达点信息列表，按距离排序
         """
-        # 检查是否在转弯处
-        if index > 0 and index < len(path) - 1:
-            prev = path[index - 1]
-            curr = path[index]
-            next_p = path[index + 1]
+        accessible_points = []
+        
+        # 遍历所有骨干路径
+        for path_id, path_data in self.paths.items():
+            path = path_data['path']
             
-            # 计算方向变化
-            if len(curr) > 2:
-                # 如果路径点包含方向信息
-                prev_theta = prev[2] if len(prev) > 2 else 0
-                next_theta = next_p[2] if len(next_p) > 2 else 0
+            # 采样路径点（避免检查过多点）
+            for idx in range(0, len(path), sampling_step):
+                target = path[idx]
                 
-                # 计算角度差，判断是否为急转弯
-                angle_diff = abs((next_theta - prev_theta + math.pi) % (2 * math.pi) - math.pi)
-                
-                # 如果角度变化大于30度，视为不安全
-                if angle_diff > math.pi / 6:
-                    return False
-            else:
-                # 如果没有方向信息，用三点计算角度
-                dx1 = curr[0] - prev[0]
-                dy1 = curr[1] - prev[1]
-                dx2 = next_p[0] - curr[0]
-                dy2 = next_p[1] - curr[1]
-                
-                # 计算夹角余弦值
-                if (dx1 == 0 and dy1 == 0) or (dx2 == 0 and dy2 == 0):
-                    return False  # 避免除零错误
+                # 尝试用RRT规划到此点
+                if rrt_planner.is_path_possible(position, target):
+                    accessible_points.append({
+                        'path_id': path_id,
+                        'path_index': idx,
+                        'position': target,
+                        'distance': self._calculate_distance(position, target)
+                    })
                     
-                dot_product = dx1 * dx2 + dy1 * dy2
-                magnitude1 = (dx1 ** 2 + dy1 ** 2) ** 0.5
-                magnitude2 = (dx2 ** 2 + dy2 ** 2) ** 0.5
-                
-                cos_angle = dot_product / (magnitude1 * magnitude2)
-                
-                # 余弦值小于0.866（约30度）视为不安全
-                if cos_angle < 0.866:
-                    return False
+                    # 找到足够多的候选点后停止
+                    if len(accessible_points) >= max_candidates:
+                        break
         
-        # 检查是否有足够空间（离障碍物足够远）
-        # 简单检查，可以根据需要扩展
-        min_distance = 5.0  # 至少5个单位距离
-        
-        x, y = path[index][0], path[index][1]
-        
-        # 检查周围8个方向是否有障碍物
-        for dx in [-1, 0, 1]:
-            for dy in [-1, 0, 1]:
-                if dx == 0 and dy == 0:
-                    continue
-                
-                # 检查该方向上的多个点
-                for d in range(1, int(min_distance) + 1):
-                    check_x = int(x + dx * d)
-                    check_y = int(y + dy * d)
-                    
-                    # 检查是否超出地图范围
-                    if not self._is_valid_grid_position(check_x, check_y):
-                        continue
-                    
-                    # 检查是否为障碍物
-                    if self._is_obstacle(check_x, check_y):
-                        return False  # 太靠近障碍物
-        
-        return True
-    
-    def _is_valid_grid_position(self, x, y):
-        """检查位置是否在网格范围内
-        
-        Args:
-            x, y: 位置坐标
-            
-        Returns:
-            bool: 是否在有效范围内
-        """
-        return (0 <= x < self.env.width and 0 <= y < self.env.height)
-    
-    def _is_obstacle(self, x, y):
-        """检查位置是否为障碍物
-        
-        Args:
-            x, y: 位置坐标
-            
-        Returns:
-            bool: 是否为障碍物
-        """
-        try:
-            return self.env.grid[x, y] == 1
-        except (IndexError, AttributeError):
-            # 如果出现索引错误或属性错误，安全返回
-            return False
-    
-    def find_nearest_connection(self, position, max_distance=20.0):
-        """查找最近的连接点
-        
-        查找离给定位置最近的连接点，用于车辆进入主干网络。
-        
-        Args:
-            position (tuple): 位置坐标 (x, y) 或 (x, y, theta)
-            max_distance (float, optional): 最大搜索距离
-            
-        Returns:
-            dict or None: 最近的连接点信息，如果没有找到则返回None
-        """
-        if not self.connections:
-            return None
-            
-        nearest = None
-        min_dist = float('inf')
-        
-        for conn_id, conn_data in self.connections.items():
-            dist = self._calculate_distance(position, conn_data['position'])
-            if dist < min_dist and dist <= max_distance:
-                min_dist = dist
-                nearest = conn_data
-        
-        return nearest
+        # 按距离排序
+        return sorted(accessible_points, key=lambda x: x['distance'])
     
     def find_path(self, start_id, end_id):
         """在主干网络中查找从起点到终点的最佳路径
@@ -611,15 +443,7 @@ class BackbonePathNetwork:
             return list(reversed(path[end_index:start_index + 1]))
     
     def _calculate_distance(self, pos1, pos2):
-        """计算两点之间的欧几里得距离
-        
-        Args:
-            pos1 (tuple): 第一个点的坐标
-            pos2 (tuple): 第二个点的坐标
-            
-        Returns:
-            float: 两点之间的距离
-        """
+        """计算两点之间的欧几里得距离"""
         # 确保坐标至少有x,y两个值
         x1 = pos1[0] if len(pos1) > 0 else 0
         y1 = pos1[1] if len(pos1) > 1 else 0
@@ -629,14 +453,7 @@ class BackbonePathNetwork:
         return ((x1 - x2) ** 2 + (y1 - y2) ** 2) ** 0.5
     
     def _calculate_path_length(self, path):
-        """计算路径总长度
-        
-        Args:
-            path (list): 路径点列表
-            
-        Returns:
-            float: 路径总长度
-        """
+        """计算路径总长度"""
         if not path or len(path) < 2:
             return 0
             
@@ -767,7 +584,7 @@ class BackbonePathNetwork:
                 mag2 = (dx2 ** 2 + dy2 ** 2) ** 0.5
                 
                 cos_angle = dot_product / (mag1 * mag2)
-                cos_angle = max(-1.0, min(1.0, cos_angle))  # 确保在有效范围内
+                cos_angle = max(-1.0, min(1.0, cos_angle))  # 防止数值误差
                 
                 angle_change = math.acos(cos_angle)
                 total_angle_change += angle_change
@@ -792,33 +609,12 @@ class BackbonePathNetwork:
         Returns:
             RRTPlanner: 路径规划器
         """
-        # 创建双向RRT规划器
-        planner = RRTPlanner(
-            self.env, 
-            vehicle_length=6.0,  # 默认车辆长度
-            vehicle_width=3.0,   # 默认车辆宽度
-            turning_radius=8.0,  # 最小转弯半径
-            step_size=0.8,       # 步长
-            grid_resolution=0.3  # 网格分辨率
-        )
-        
-        # 启用调试标志以便输出更多信息
-        planner.debug = False
-        
-        # 设置规划参数
-        planner.bidirectional_rrt.max_steer = math.pi/4
-        planner.bidirectional_rrt.goal_bias = 0.2
-        
-        # 启用路径优化
-        planner.path_smoothing = True
-        planner.smoothing_params = {
-            'min_segment_length': 4,    # 最小线段长度
-            'max_error': 1.0,           # 最大误差
-            'angle_threshold': 0.3,     # 转弯角度阈值
-            'turn_optimization_iters': 3 # 转弯优化迭代次数
-        }
-        
-        return planner
+        # 如果有RRT规划器可用，则使用它
+        if hasattr(self.env, 'rrt_planner') and self.env.rrt_planner:
+            return self.env.rrt_planner
+            
+        # 否则使用SimplePlanner作为后备
+        return SimplePlanner(self.env)
     
     def update_traffic_flow(self, path_id, delta=1):
         """更新路径的交通流量
@@ -864,6 +660,7 @@ class BackbonePathNetwork:
         # 实现取决于可视化系统
         pass
 
+
 class SimplePlanner:
     """简单的路径规划器，用于临时替代 PathPlanner"""
     
@@ -875,7 +672,7 @@ class SimplePlanner:
         """
         self.env = env
     
-    def plan_path(self, start, goal):
+    def plan_path(self, start, goal, max_iterations=1000):
         """规划从起点到终点的路径
         
         简单实现，仅生成直线路径并避开障碍物。
@@ -883,6 +680,7 @@ class SimplePlanner:
         Args:
             start (tuple): 起点坐标
             goal (tuple): 终点坐标
+            max_iterations: 最大迭代次数（此实现未使用）
             
         Returns:
             list: 路径点列表
@@ -909,33 +707,60 @@ class SimplePlanner:
             path.append((x, y, theta))
         
         return path
-
-def test_backbone_network():
-    # Create test environment
-    from environment import OpenPitMineEnv
+        
+    def is_path_possible(self, start, goal):
+        """检查是否可以在起点和终点之间规划路径
+        
+        简单实现，检查两点连线是否穿越障碍物。
+        
+        Args:
+            start: 起点坐标
+            goal: 终点坐标
+            
+        Returns:
+            bool: 是否可能有路径
+        """
+        # 提取坐标
+        start_x = int(start[0]) if len(start) > 0 else 0
+        start_y = int(start[1]) if len(start) > 1 else 0
+        goal_x = int(goal[0]) if len(goal) > 0 else 0
+        goal_y = int(goal[1]) if len(goal) > 1 else 0
+        
+        # 检查两点是否在障碍物上
+        if (not self._is_valid_position(start_x, start_y) or 
+            not self._is_valid_position(goal_x, goal_y)):
+            return False
+        
+        # 使用Bresenham算法检查线段是否穿越障碍物
+        x, y = start_x, start_y
+        dx = abs(goal_x - start_x)
+        dy = abs(goal_y - start_y)
+        sx = 1 if start_x < goal_x else -1
+        sy = 1 if start_y < goal_y else -1
+        err = dx - dy
+        
+        while x != goal_x or y != goal_y:
+            if not self._is_valid_position(x, y):
+                return False
+                
+            e2 = 2 * err
+            if e2 > -dy:
+                err -= dy
+                x += sx
+            if e2 < dx:
+                err += dx
+                y += sy
+        
+        return True
     
-    env = OpenPitMineEnv(width=500, height=500)
-    
-    # Add obstacles
-    env.add_obstacle(100, 100, 50, 50)
-    env.add_obstacle(300, 200, 80, 30)
-    
-    # Add key points
-    env.add_loading_point((50, 50))
-    env.add_unloading_point((450, 450))
-    
-    # Create and generate backbone network
-    backbone = BackbonePathNetwork(env)
-    backbone.generate_network()
-    
-    # Check if paths were generated
-    print(f"Generated {len(backbone.paths)} paths")
-    print(f"Created {len(backbone.connections)} connection points")
-    
-    # Visualize if needed
-    backbone.visualize()
-    
-    return backbone
-
-if __name__ == "__main__":
-    test_backbone_network()
+    def _is_valid_position(self, x, y):
+        """检查位置是否有效（不是障碍物）"""
+        if not hasattr(self.env, 'grid'):
+            return True
+            
+        # 检查是否在地图范围内
+        if x < 0 or x >= self.env.width or y < 0 or y >= self.env.height:
+            return False
+            
+        # 检查是否是障碍物 (0=可通行, 1=障碍物)
+        return self.env.grid[x, y] == 0
