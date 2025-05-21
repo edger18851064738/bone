@@ -395,7 +395,8 @@ class BackbonePathNetwork:
         
         return nearest_info
      
-    # 新增方法：获取可达点
+
+    
     def find_accessible_points(self, position, rrt_planner, max_candidates=5, sampling_step=10, max_distance=20.0):
         """
         查找可通过RRT从当前位置到达的骨干路径点 - 增强版

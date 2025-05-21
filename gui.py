@@ -555,29 +555,36 @@ class BackbonePathVisualizer(QGraphicsItemGroup):
 
 
 class PathGraphicsItem(QGraphicsPathItem):
-    """路径图形项 - 优化版"""
-    def __init__(self, path, parent=None, vehicle_id=None):
+    """路径图形项 - 优化版，区分不同路径部分"""
+    def __init__(self, path, parent=None, vehicle_id=None, path_structure=None):
         super().__init__(parent)
         self.path_data = path
         self.vehicle_id = vehicle_id
+        self.path_structure = path_structure  # 新增: 路径结构信息
+        self.path_segments = []  # 存储路径段图形项
         self.update_path()
         
-        # 改进样式 - 使用更漂亮的渐变色
-        gradient = QLinearGradient(0, 0, 100, 100)
-        
-        # 使用与车辆颜色匹配的渐变
-        if vehicle_id is not None:
-            gradient.setColorAt(0, QColor(0, 190, 255, 220))  # 起点为亮蓝色
-            gradient.setColorAt(1, QColor(255, 100, 100, 220))  # 终点为红色
+        # 根据路径结构使用不同的样式
+        if path_structure and all(k in path_structure for k in ['to_backbone_path', 'backbone_path', 'from_backbone_path']):
+            # 创建结构化路径，显示不同段
+            self.create_structured_path()
         else:
-            gradient.setColorAt(0, QColor(0, 200, 100, 180))  # 起点为绿色
-            gradient.setColorAt(1, QColor(200, 0, 100, 180))  # 终点为紫色
-        
-        # 改进线条样式
-        pen = QPen(gradient, 0.5)  # 增加线宽使路径更明显
-        pen.setStyle(Qt.DashLine)
-        pen.setDashPattern([5, 3])  # 更美观的虚线模式
-        self.setPen(pen)
+            # 使用默认样式
+            gradient = QLinearGradient(0, 0, 100, 100)
+            
+            # 使用与车辆颜色匹配的渐变
+            if vehicle_id is not None:
+                gradient.setColorAt(0, QColor(0, 190, 255, 220))  # 起点为亮蓝色
+                gradient.setColorAt(1, QColor(255, 100, 100, 220))  # 终点为红色
+            else:
+                gradient.setColorAt(0, QColor(0, 200, 100, 180))  # 起点为绿色
+                gradient.setColorAt(1, QColor(200, 0, 100, 180))  # 终点为紫色
+            
+            # 改进线条样式
+            pen = QPen(gradient, 0.5)
+            pen.setStyle(Qt.DashLine)
+            pen.setDashPattern([5, 3])
+            self.setPen(pen)
         
         # 设置Z值，确保路径显示在车辆下方
         self.setZValue(5)
@@ -586,98 +593,88 @@ class PathGraphicsItem(QGraphicsPathItem):
         self.path_points = []
         self.add_path_point_markers()
     
-    def update_path(self):
-        """更新路径"""
-        if not self.path_data or len(self.path_data) < 2:
+    def create_structured_path(self):
+        """创建结构化路径 - 不同部分使用不同样式"""
+        if not self.path_structure:
             return
-            
-        # 创建路径
-        painter_path = QPainterPath()
         
-        # 移动到第一个点
-        start_point = self.path_data[0]
-        painter_path.moveTo(start_point[0], start_point[1])
-        
-        # 连接所有点
-        for point in self.path_data[1:]:
-            painter_path.lineTo(point[0], point[1])
-        
-        self.setPath(painter_path)
-    
-    def add_path_point_markers(self):
-        """添加路径点标记 - 美化版"""
-        # 先清除旧标记
-        for item in self.path_points:
+        # 清除现有路径段
+        for item in self.path_segments:
             if item.scene():
                 item.scene().removeItem(item)
-        self.path_points.clear()
-        
-        # 仅在路径的开头、结尾和一些关键点添加标记（减少标记数量）
-        key_points_indices = self._get_key_points_indices()
-        
-        for i in key_points_indices:
-            point = self.path_data[i]
+        self.path_segments = []
             
-            # 为起点、终点和中间点使用不同颜色
-            if i == 0:
-                color = QColor(0, 200, 100, 200)  # 起点为绿色
-                size = 2.5
-            elif i == len(self.path_data) - 1:
-                color = QColor(200, 50, 50, 200)  # 终点为红色
-                size = 2.5
-            else:
-                color = QColor(50, 100, 200, 150)  # 中间点为蓝色
-                size = 1.5
+        # 提取路径各部分
+        to_backbone = self.path_structure.get('to_backbone_path')
+        backbone = self.path_structure.get('backbone_path')
+        from_backbone = self.path_structure.get('from_backbone_path')
+        
+        # 绘制从起点到骨干网络的路径（虚线，亮蓝色）
+        if to_backbone and len(to_backbone) > 1:
+            # 创建路径
+            painter_path = QPainterPath()
+            painter_path.moveTo(to_backbone[0][0], to_backbone[0][1])
             
-            # 创建更美观的点标记
-            point_marker = QGraphicsEllipseItem(point[0] - size/2, point[1] - size/2, size, size)
-            point_marker.setBrush(QBrush(color))
-            point_marker.setPen(QPen(Qt.black, 0.2))
-            point_marker.setZValue(6)  # 确保在路径之上
+            for point in to_backbone[1:]:
+                painter_path.lineTo(point[0], point[1])
+                
+            # 设置样式
+            pen_to_backbone = QPen(QColor(0, 200, 255, 220), 0.5)
+            pen_to_backbone.setStyle(Qt.DashLine)
+            pen_to_backbone.setDashPattern([5, 3])
+            
+            # 创建路径项
+            to_backbone_item = QGraphicsPathItem(painter_path)
+            to_backbone_item.setPen(pen_to_backbone)
+            to_backbone_item.setZValue(5)
             
             if self.scene():
-                self.scene().addItem(point_marker)
-            self.path_points.append(point_marker)
+                self.scene().addItem(to_backbone_item)
+                self.path_segments.append(to_backbone_item)
+        
+        # 绘制骨干网络路径（实线，粗，绿色）
+        if backbone and len(backbone) > 1:
+            # 创建路径
+            painter_path = QPainterPath()
+            painter_path.moveTo(backbone[0][0], backbone[0][1])
             
-            # 为关键点添加索引标签
-            if i == 0 or i == len(self.path_data) - 1 or i % 20 == 0:
-                text = QGraphicsTextItem(str(i))
-                text.setPos(point[0] + 1, point[1] - 3)
-                text.setScale(0.5)  # 缩小文本大小
-                text.setDefaultTextColor(QColor(50, 50, 50, 180))
-                text.setFont(QFont("Arial", 2, QFont.Bold))
-                if self.scene():
-                    self.scene().addItem(text)
-                self.path_points.append(text)
-    
-    def _get_key_points_indices(self):
-        """获取关键点索引 - 根据转弯等特征选择关键点"""
-        if len(self.path_data) <= 10:
-            # 如果点很少，全部显示
-            return range(len(self.path_data))
-        
-        # 始终包含起点和终点
-        key_indices = {0, len(self.path_data) - 1}
-        
-        # 添加转弯点和定期采样点
-        for i in range(1, len(self.path_data) - 1):
-            if i % 20 == 0:  # 定期采样
-                key_indices.add(i)
-                continue
+            for point in backbone[1:]:
+                painter_path.lineTo(point[0], point[1])
                 
-            # 检测转弯点（如果有角度信息）
-            if len(self.path_data[i]) >= 3:
-                prev_theta = self.path_data[i-1][2]
-                curr_theta = self.path_data[i][2]
-                next_theta = self.path_data[i+1][2]
-                
-                # 如果角度变化显著，则为转弯点
-                if abs((curr_theta - prev_theta + math.pi) % (2*math.pi) - math.pi) > 0.2 or \
-                   abs((next_theta - curr_theta + math.pi) % (2*math.pi) - math.pi) > 0.2:
-                    key_indices.add(i)
+            # 设置样式
+            pen_backbone = QPen(QColor(50, 180, 50, 220), 1.0)  # 粗一点，更明显
+            
+            # 创建路径项
+            backbone_item = QGraphicsPathItem(painter_path)
+            backbone_item.setPen(pen_backbone)
+            backbone_item.setZValue(5)
+            
+            if self.scene():
+                self.scene().addItem(backbone_item)
+                self.path_segments.append(backbone_item)
         
-        return sorted(list(key_indices))
-
+        # 绘制从骨干网络到终点的路径（虚线，红色）
+        if from_backbone and len(from_backbone) > 1:
+            # 创建路径
+            painter_path = QPainterPath()
+            painter_path.moveTo(from_backbone[0][0], from_backbone[0][1])
+            
+            for point in from_backbone[1:]:
+                painter_path.lineTo(point[0], point[1])
+                
+            # 设置样式
+            pen_from_backbone = QPen(QColor(255, 100, 100, 220), 0.5)
+            pen_from_backbone.setStyle(Qt.DashLine)
+            pen_from_backbone.setDashPattern([5, 3])
+            
+            # 创建路径项
+            from_backbone_item = QGraphicsPathItem(painter_path)
+            from_backbone_item.setPen(pen_from_backbone)
+            from_backbone_item.setZValue(5)
+            
+            if self.scene():
+                self.scene().addItem(from_backbone_item)
+                self.path_segments.append(from_backbone_item)
 
 class MineGraphicsScene(QGraphicsScene):
     """矿场图形场景 - 优化版"""

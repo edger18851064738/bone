@@ -68,6 +68,8 @@ class PathPlanner:
         """设置交通管理器"""
         self.traffic_manager = traffic_manager
     
+
+
     def plan_path(self, vehicle_id, start, goal, use_backbone=True, check_conflicts=True):
         """
         规划从起点到终点的完整路径 - 增强三段规划支持
@@ -261,266 +263,43 @@ class PathPlanner:
         
         return best_path, best_structure
     
-    def _plan_with_backbone_and_rrt(self, vehicle_id, start, goal):
-        """结合骨干网络和RRT进行规划
-        
-        Args:
-            vehicle_id: 车辆ID
-            start: 起点坐标
-            goal: 终点坐标
-        
-        Returns:
-            list or None: 路径点列表
-        """
-        if not self.backbone_network or not self.rrt_planner:
-            return None
-        
-        # 1. 寻找起点附近可通过RRT到达的骨干路径点
-        start_candidates = self.backbone_network.find_accessible_points(
-            start, self.rrt_planner
-        )
-        if not start_candidates:
-            if self.debug:
-                print(f"[PathPlanner] 无法从起点 {start} 到达任何骨干路径点")
-            return None  # 无法从起点到达任何骨干路径点
+    def _merge_paths(self, path1, path2, path3=None):
+        """合并多个路径段，避免重复点"""
+        if not path1:
+            if not path2:
+                return path3 or []
+            if not path3:
+                return path2
+            if self._is_same_position(path2[-1], path3[0]):
+                return path2 + path3[1:]
+            return path2 + path3
             
-        # 2. 寻找终点附近可通过RRT到达的骨干路径点
-        goal_candidates = self.backbone_network.find_accessible_points(
-            goal, self.rrt_planner
-        )
-        if not goal_candidates:
-            if self.debug:
-                print(f"[PathPlanner] 无法从任何骨干路径点到达终点 {goal}")
-            return None  # 无法从任何骨干路径点到达终点
-            
-        # 3. 遍历可能的组合，找出最佳路径
-        best_path = None
-        best_length = float('inf')
+        result = list(path1)
         
-        for start_point in start_candidates[:2]:  # 限制尝试次数
-            for goal_point in goal_candidates[:2]:
-                # 规划三段路径
-                
-                # a. 从起点到骨干入口点
-                path_to_backbone = self._plan_local_path(
-                    start, start_point['position']
-                )
-                if not path_to_backbone:
-                    continue
-                    
-                # b. 在骨干网络中的路径
-                backbone_path = self._get_backbone_segment(
-                    start_point['path_id'],
-                    start_point['path_index'],
-                    goal_point['path_id'],
-                    goal_point['path_index']
-                )
-                if not backbone_path:
-                    continue
-                    
-                # c. 从骨干出口点到终点
-                path_from_backbone = self._plan_local_path(
-                    goal_point['position'], goal
-                )
-                if not path_from_backbone:
-                    continue
-                
-                # 合并三段路径
-                complete_path = self._merge_paths(
-                    path_to_backbone, backbone_path, path_from_backbone
-                )
-                
-                # 验证完整路径
-                if self.path_validation_enabled and not self._validate_path(complete_path):
-                    continue
-                
-                # 计算路径长度
-                path_length = self._calculate_path_length(complete_path)
-                if path_length < best_length:
-                    best_path = complete_path
-                    best_length = path_length
-        
-        # 如果找到有效路径，进行平滑处理
-        if best_path and self.path_smoothing_enabled:
-            best_path = self._smooth_path(best_path)
-        
-        return best_path
-    
-    def _plan_direct_path(self, start, goal):
-        """使用RRT规划器直接规划路径
-        
-        Args:
-            start: 起点坐标
-            goal: 终点坐标
-            
-        Returns:
-            list or None: 路径点列表
-        """
-        if self.rrt_planner:
-            try:
-                # 使用RRT规划器规划路径
-                path = self.rrt_planner.plan_path(start, goal)
-                
-                if path and self.path_smoothing_enabled:
-                    path = self._smooth_path(path)
-                
-                if self.debug and path:
-                    print(f"[PathPlanner] RRT规划成功: {len(path)}点")
-                
-                return path
-            except Exception as e:
-                if self.debug:
-                    print(f"[PathPlanner] RRT规划器异常: {str(e)}")
-                return None
-        
-        # 如果RRT规划器不可用，使用简单直线路径
-        return self._plan_simple_path(start, goal)
-    
-    def _plan_local_path(self, start, goal):
-        """规划本地路径（使用RRT规划器）
-        
-        Args:
-            start: 起点坐标
-            goal: 终点坐标
-            
-        Returns:
-            list or None: 路径点列表
-        """
-        if self.rrt_planner:
-            try:
-                path = self.rrt_planner.plan_path(start, goal)
-                return path
-            except Exception as e:
-                if self.debug:
-                    print(f"[PathPlanner] 本地路径规划异常: {str(e)}")
-        
-        # 回退到简单路径规划
-        return self._plan_simple_path(start, goal)
-    
-    def _plan_simple_path(self, start, goal):
-        """简单直线路径规划
-        
-        当RRT规划器不可用时的后备方案。
-        
-        Args:
-            start: 起点坐标
-            goal: 终点坐标
-            
-        Returns:
-            list: 路径点列表
-        """
-        # 确保起点和终点有角度
-        if len(start) < 3:
-            s_x, s_y = start[:2]
-            s_theta = 0.0
-        else:
-            s_x, s_y, s_theta = start
-            
-        if len(goal) < 3:
-            g_x, g_y = goal[:2]
-            g_theta = 0.0
-        else:
-            g_x, g_y, g_theta = goal
-        
-        # 计算方向角度
-        theta = math.atan2(g_y - s_y, g_x - s_x)
-        
-        # 计算距离
-        distance = math.sqrt((g_x - s_x) ** 2 + (g_y - s_y) ** 2)
-        
-        # 点的数量（根据距离调整）
-        num_points = max(2, int(distance / 5))  # 每5个单位一个点
-        
-        # 创建路径点
-        path = []
-        for i in range(num_points):
-            t = i / (num_points - 1)
-            x = s_x + t * (g_x - s_x)
-            y = s_y + t * (g_y - s_y)
-            
-            # 起点和终点使用原始角度，中间点使用方向角度
-            if i == 0:
-                angle = s_theta
-            elif i == num_points - 1:
-                angle = g_theta
+        if path2:
+            if self._is_same_position(result[-1], path2[0]):
+                result = result[:-1] + path2
             else:
-                angle = theta
+                result.extend(path2)
                 
-            path.append((x, y, angle))
-        
-        return path
+        if path3:
+            if self._is_same_position(result[-1], path3[0]):
+                result = result[:-1] + path3
+            else:
+                result.extend(path3)
+                
+        return result
     
     def _get_backbone_segment(self, start_path_id, start_index, end_path_id, end_index):
-        """获取骨干网络中的路径段
-        
-        Args:
-            start_path_id: 起始路径ID
-            start_index: 起始路径索引
-            end_path_id: 结束路径ID
-            end_index: 结束路径索引
-            
-        Returns:
-            list or None: 路径段点列表
-        """
+        """从骨干网络获取路径段"""
         if not self.backbone_network:
             return None
-        
-        # 如果在同一路径上
-        if start_path_id == end_path_id:
-            return self.backbone_network.get_path_segment(start_path_id, start_index, end_index)
-        
-        # 不在同一路径上，需要进行路由
-        # 首先需要找到路径起终点对应的节点ID
-        start_node_id = self._get_node_id_for_path(start_path_id, start_index)
-        end_node_id = self._get_node_id_for_path(end_path_id, end_index)
-        
-        if not start_node_id or not end_node_id:
-            if self.debug:
-                print(f"[PathPlanner] 无法找到路径对应的节点ID: {start_path_id}[{start_index}] -> {end_path_id}[{end_index}]")
-            return None
-        
-        # 在主干网络中查找路径
-        path_ids = self.backbone_network.find_path(start_node_id, end_node_id)
-        
-        if not path_ids:
-            if self.debug:
-                print(f"[PathPlanner] 在主干网络中无法找到路径: {start_node_id} -> {end_node_id}")
-            return None
-        
-        # 构建完整路径
-        full_path = []
-        
-        # 添加第一段
-        if start_index > 0:
-            first_segment = self.backbone_network.get_path_segment(start_path_id, start_index, 0)
-            if first_segment:
-                full_path.extend(first_segment)
-        
-        # 添加中间段
-        for i, path_id in enumerate(path_ids):
-            path_data = self.backbone_network.paths.get(path_id)
-            if not path_data:
-                continue
-                
-            path = path_data['path']
             
-            # 如果不是第一段，跳过第一个点以避免重复
-            if i > 0 or start_index > 0:
-                path = path[1:]
-                
-            full_path.extend(path)
+        # 创建复合路径ID (如 "path1:path2")
+        compound_path_id = f"{start_path_id}:{end_path_id}"
         
-        # 添加最后一段
-        if end_index < len(self.backbone_network.paths.get(end_path_id, {}).get('path', [])) - 1:
-            last_segment = self.backbone_network.get_path_segment(
-                end_path_id,
-                0,
-                end_index
-            )
-            if last_segment and len(last_segment) > 1:
-                full_path.extend(last_segment[1:])  # 跳过第一个点以避免重复
-        
-        return full_path
+        # 使用骨干网络获取路径段
+        return self.backbone_network.get_path_segment(compound_path_id, start_index, end_index)
     
     def _get_node_id_for_path(self, path_id, path_index):
         """获取路径点对应的节点ID

@@ -1192,12 +1192,16 @@ class TrafficManager:
         # 返回无冲突的路径
         return conflict_free_paths[vehicle_id]
     
-    def resolve_conflicts(self, paths):
+
+    
+    def resolve_conflicts(self, paths, backbone_network=None, path_structures=None):
         """
-        使用ECBS风格的约束树搜索解决冲突
+        使用ECBS风格的约束树搜索解决冲突，保留骨干网络结构
         
         Args:
             paths: 初始路径字典 {vehicle_id: path}
+            backbone_network: 骨干网络对象(可选)
+            path_structures: 路径结构信息 {vehicle_id: structure_dict}
             
         Returns:
             dict: 无冲突的路径字典，如果无法解决则返回None
@@ -1208,6 +1212,10 @@ class TrafficManager:
             solution=paths.copy(),
             cost=self._calculate_solution_cost(paths)
         )
+        
+        # 保存路径结构信息 - 新增
+        self.path_structures = path_structures or {}
+        self.backbone_network = backbone_network
         
         # 检测初始冲突
         root.conflicts = self.detect_conflicts(root.solution)
@@ -1254,151 +1262,10 @@ class TrafficManager:
         
         # 如果达到最大迭代次数，返回找到的最佳解决方案
         return self._get_best_solution()
-    
-    def _get_best_node(self):
-        """从focal list中获取最佳节点（冲突最少）"""
-        if not self.focal_list:
-            return None
-        
-        # 找到冲突最少的节点
-        best_node = min(self.focal_list, key=lambda n: n.conflict_count)
-        
-        # 从两个列表中移除
-        self.focal_list.remove(best_node)
-        self.open_list.remove(best_node)
-        
-        return best_node
-    
-    def _update_focal_list(self):
-        """更新focal list，确保只包含在次优界限内的节点"""
-        if not self.open_list:
-            self.focal_list = []
-            return
-        
-        # 找到open list中成本最小的节点
-        min_cost = min(node.cost for node in self.open_list)
-        
-        # 次优界限
-        focal_bound = min_cost * self.suboptimality_bound
-        
-        # 更新focal list
-        self.focal_list = [node for node in self.open_list if node.cost <= focal_bound]
-    
-    def _get_best_solution(self):
-        """获取open list中最佳的解决方案"""
-        if not self.open_list:
-            return None
-        
-        # 找到冲突最少的节点
-        best_node = min(self.open_list, key=lambda n: n.conflict_count)
-        
-        return best_node.solution
-    
-    def _generate_constraint(self, agent_id, conflict):
-        """根据冲突生成约束"""
-        if conflict.conflict_type == "vertex":
-            # 顶点约束 - 禁止在特定时间点处于特定位置
-            return Constraint(
-                agent_id=agent_id,
-                location=conflict.location,
-                time_step=conflict.time_step,
-                constraint_type="vertex"
-            )
-        elif conflict.conflict_type == "edge":
-            # 边约束 - 禁止在特定时间段内穿过特定边
-            return Constraint(
-                agent_id=agent_id,
-                location=conflict.location,
-                time_step=conflict.time_step,
-                constraint_type="edge"
-            )
-        elif conflict.conflict_type == "connection":
-            # 连接点约束 - 禁止在特定时间使用特定连接点
-            return Constraint(
-                agent_id=agent_id,
-                location=conflict.location,
-                time_step=conflict.time_step,
-                constraint_type="connection"
-            )
-        elif conflict.conflict_type == "traversal":
-            # 穿越约束 - 禁止在特定时间区间内穿越主干路径
-            return Constraint(
-                agent_id=agent_id,
-                location=conflict.location,
-                time_step=conflict.time_step,
-                constraint_type="traversal"
-            )
-        elif conflict.conflict_type == "following":
-            # 追逐约束 - 强制减速或加速
-            return Constraint(
-                agent_id=agent_id,
-                location=conflict.location,
-                time_step=conflict.time_step,
-                constraint_type="following"
-            )
-        else:
-            # 默认为顶点约束
-            return Constraint(
-                agent_id=agent_id,
-                location=conflict.location,
-                time_step=conflict.time_step,
-                constraint_type="vertex"
-            )
-    
-    def _create_child_node(self, parent, constraint):
-        """创建并返回子节点"""
-        # 创建新的约束列表
-        new_constraints = parent.constraints.copy()
-        new_constraints.append(constraint)
-        
-        # 复制解决方案
-        new_solution = parent.solution.copy()
-        
-        # 应用约束并重新规划受影响车辆的路径
-        agent_id = constraint.agent_id
-        
-        if agent_id in new_solution:
-            # 找到受约束车辆的起终点
-            agent_path = new_solution[agent_id]
-            
-            if not agent_path or len(agent_path) < 2:
-                return None
-                
-            start = agent_path[0]
-            goal = agent_path[-1]
-            
-            # 应用约束重新规划路径
-            new_path = self._apply_constraint(agent_id, constraint, parent.solution)
-            
-            if not new_path:
-                # 如果无法满足约束，返回None
-                return None
-                
-            # 更新解决方案
-            new_solution[agent_id] = new_path
-            
-            # 计算新成本
-            new_cost = self._calculate_solution_cost(new_solution)
-            
-            # 检测新的冲突
-            new_conflicts = self.detect_conflicts(new_solution)
-            
-            # 创建子节点
-            child = ConstraintTreeNode(
-                constraints=new_constraints,
-                solution=new_solution,
-                cost=new_cost,
-                conflicts=new_conflicts,
-                parent=parent
-            )
-            
-            return child
-        
-        return None
-    
+
     def _apply_constraint(self, agent_id, constraint, solution):
         """
-        应用约束并重新规划路径
+        应用约束并重新规划路径，保留骨干网络结构
         
         Args:
             agent_id: 车辆ID
@@ -1418,193 +1285,267 @@ class TrafficManager:
         start = current_path[0]
         goal = current_path[-1]
         
-        # 找出是否是主干路径段
-        backbone_segments = self._identify_backbone_segments(current_path)
-        
-        # 创建路径规划器
-        planner = None
-        if hasattr(self.env, 'path_planner') and self.env.path_planner:
-            planner = self.env.path_planner
-        
-        if not planner:
-            return None
+        # 获取路径结构信息 - 新增
+        path_structure = self.path_structures.get(agent_id, {})
         
         # 根据约束类型处理
-        if constraint.constraint_type == "vertex":
-            # 顶点约束 - 避免特定时间点处于特定位置
-            # 创建临时检查函数，在规划时避开约束位置
-            def custom_collision_checker(x, y, theta):
-                # 检查是否接近约束位置
-                if constraint.location:
-                    dist = self._calculate_distance((x, y), constraint.location)
-                    if dist < 2.0:  # 安全距离
-                        return False
-                return True
+        if constraint.constraint_type in ["vertex", "edge", "connection", "traversal"]:
+            # 获取冲突位置和时间
+            conflict_location = constraint.location
+            conflict_time = constraint.time_step
             
-            # 保存原有的碰撞检测器
-            original_checker = None
-            if hasattr(planner, 'collision_checker'):
-                original_checker = planner.collision_checker
-            
-            # 设置临时检测器
-            planner.collision_checker = custom_collision_checker
-            
-            # 重新规划路径
-            new_path = planner.plan_path(agent_id, start, goal, check_conflicts=False)
-            
-            # 恢复原有检测器
-            if original_checker:
-                planner.collision_checker = original_checker
-            
-            return new_path
-            
-        elif constraint.constraint_type in ["edge", "connection", "traversal"]:
-            # 对于这些约束，尝试保留尽可能多的主干使用
-            # 找出约束影响的主干段
-            constrained_segment = None
-            
-            for segment in backbone_segments:
-                if isinstance(constraint.location, str) and "backbone_" in constraint.location:
-                    # 提取主干路径ID
-                    path_id = constraint.location.replace("backbone_", "")
-                    if segment['path_id'] == path_id:
-                        constrained_segment = segment
-                        break
-            
-            # 如果约束影响主干段，尝试避开该段
-            if constrained_segment:
-                # 找到替代路径
-                modified_path = self._find_alternative_backbone_path(
-                    current_path, 
-                    constrained_segment,
-                    start,
-                    goal
-                )
+            # 如果有骨干网络和路径结构，尝试保留骨干部分
+            if self.backbone_network and path_structure:
+                # 提取路径各部分
+                to_backbone = path_structure.get('to_backbone_path')
+                backbone_path = path_structure.get('backbone_path')
+                from_backbone = path_structure.get('from_backbone_path')
                 
-                if modified_path:
-                    return modified_path
-            
-            # 如果没有找到合适的替代主干路径，尝试完全规划
-            return planner.plan_path(agent_id, start, goal, use_backbone=True, check_conflicts=False)
-            
-        elif constraint.constraint_type == "following":
-            # 追逐约束 - 调整速度或等待时间
-            # 简单实现：添加延迟点，强制车辆等待
-            delay_path = current_path.copy()
-            
-            # 在开始处添加一些额外点以创造延迟
-            first_point = delay_path[0]
-            delay_points = [first_point] * 3  # 添加3个相同的点，模拟等待
-            
-            delay_path = delay_points + delay_path[1:]
-            
-            return delay_path
+                # 判断冲突在哪个部分
+                conflict_part = None
+                if to_backbone and self._is_conflict_in_path_segment(constraint, to_backbone):
+                    conflict_part = "to_backbone"
+                elif backbone_path and self._is_conflict_in_path_segment(constraint, backbone_path):
+                    conflict_part = "backbone"
+                elif from_backbone and self._is_conflict_in_path_segment(constraint, from_backbone):
+                    conflict_part = "from_backbone"
+                
+                # 只重新规划冲突部分
+                if conflict_part == "to_backbone" and backbone_path:
+                    # 重新规划到骨干网络的路径
+                    entry_point = path_structure.get('entry_point')
+                    if entry_point and entry_point.get('position'):
+                        # 创建临时检查函数，在规划时避开约束位置
+                        def custom_collision_checker(x, y, theta):
+                            # 检查是否接近约束位置
+                            if constraint.location:
+                                dist = self._calculate_distance((x, y), constraint.location)
+                                if dist < 2.0:  # 安全距离
+                                    return False
+                            return True
+                        
+                        # 获取路径规划器
+                        planner = None
+                        if hasattr(self.env, 'path_planner') and self.env.path_planner:
+                            planner = self.env.path_planner
+                        
+                        if planner:
+                            # 保存原有的碰撞检测器
+                            original_checker = None
+                            if hasattr(planner, 'collision_checker'):
+                                original_checker = planner.collision_checker
+                            
+                            # 设置临时检测器
+                            planner.collision_checker = custom_collision_checker
+                            
+                            # 重新规划到骨干网络的路径
+                            new_to_backbone = planner.plan_path(
+                                agent_id, 
+                                start, 
+                                entry_point['position'],
+                                use_backbone=False
+                            )
+                            
+                            # 恢复原有检测器
+                            if original_checker:
+                                planner.collision_checker = original_checker
+                            
+                            if new_to_backbone:
+                                # 合并新路径
+                                complete_path = self._merge_paths(
+                                    new_to_backbone,
+                                    backbone_path,
+                                    from_backbone or []
+                                )
+                                return complete_path
+                
+                elif conflict_part == "from_backbone" and backbone_path:
+                    # 重新规划从骨干网络到终点的路径
+                    exit_point = path_structure.get('exit_point')
+                    if exit_point and exit_point.get('position'):
+                        # 创建临时检查函数，同上
+                        def custom_collision_checker(x, y, theta):
+                            if constraint.location:
+                                dist = self._calculate_distance((x, y), constraint.location)
+                                if dist < 2.0:
+                                    return False
+                            return True
+                        
+                        # 获取路径规划器
+                        planner = None
+                        if hasattr(self.env, 'path_planner') and self.env.path_planner:
+                            planner = self.env.path_planner
+                        
+                        if planner:
+                            # 保存原有的碰撞检测器
+                            original_checker = None
+                            if hasattr(planner, 'collision_checker'):
+                                original_checker = planner.collision_checker
+                            
+                            # 设置临时检测器
+                            planner.collision_checker = custom_collision_checker
+                            
+                            # 重新规划从骨干到终点的路径
+                            new_from_backbone = planner.plan_path(
+                                agent_id, 
+                                exit_point['position'],
+                                goal,
+                                use_backbone=False
+                            )
+                            
+                            # 恢复原有检测器
+                            if original_checker:
+                                planner.collision_checker = original_checker
+                            
+                            if new_from_backbone:
+                                # 合并新路径
+                                complete_path = self._merge_paths(
+                                    to_backbone or [],
+                                    backbone_path,
+                                    new_from_backbone
+                                )
+                                return complete_path
+                
+                elif conflict_part == "backbone":
+                    # 尝试找到骨干网络中的替代路径
+                    entry_point = path_structure.get('entry_point')
+                    exit_point = path_structure.get('exit_point')
+                    
+                    if entry_point and exit_point and self.backbone_network:
+                        # 获取当前使用的骨干路径段ID
+                        current_segment = path_structure.get('backbone_segment')
+                        
+                        # 从骨干网络中查找替代路径
+                        if current_segment and ':' in current_segment:
+                            start_path_id, end_path_id = current_segment.split(':')
+                            
+                            # 查找从起点到终点的所有可能路径
+                            all_paths = []
+                            if hasattr(self.backbone_network, 'find_all_paths'):
+                                all_paths = self.backbone_network.find_all_paths(
+                                    start_path_id, end_path_id, max_paths=3
+                                )
+                            
+                            # 尝试每条替代路径
+                            for path_ids in all_paths:
+                                # 跳过当前路径
+                                if ':'.join(path_ids) == current_segment:
+                                    continue
+                                
+                                # 构建替代路径
+                                alt_backbone_path = []
+                                for pid in path_ids:
+                                    if pid in self.backbone_network.paths:
+                                        path = self.backbone_network.paths[pid]['path']
+                                        # 跳过第一个点以避免重复
+                                        if alt_backbone_path:
+                                            path = path[1:]
+                                        alt_backbone_path.extend(path)
+                                
+                                if alt_backbone_path:
+                                    # 验证替代路径是否避开了约束
+                                    if not self._is_conflict_in_path_segment(constraint, alt_backbone_path):
+                                        # 合并替代路径
+                                        complete_path = self._merge_paths(
+                                            to_backbone or [],
+                                            alt_backbone_path,
+                                            from_backbone or []
+                                        )
+                                        return complete_path
         
-        # 默认情况：完全重新规划
-        return planner.plan_path(agent_id, start, goal, use_backbone=True, check_conflicts=False)
-    
-    def _find_alternative_backbone_path(self, current_path, constrained_segment, start, goal):
-        """查找替代主干路径，避开受约束的段"""
-        # 这里需要使用路径规划器
-        planner = None
+        # 如果上面的保留骨干部分的规划失败，回退到完全重新规划
         if hasattr(self.env, 'path_planner') and self.env.path_planner:
-            planner = self.env.path_planner
-        
-        if not planner or not self.backbone_network:
-            return None
-        
-        # 找到约束段之前的点和之后的点
-        pre_constraint = current_path[max(0, constrained_segment['start_index'] - 1)]
-        post_constraint = current_path[min(len(current_path) - 1, constrained_segment['end_index'] + 1)]
-        
-        # 尝试找到另一条主干路径连接这两点
-        try:
-            # 找到最近的主干连接点
-            pre_conn = self.backbone_network.find_nearest_connection(pre_constraint)
-            post_conn = self.backbone_network.find_nearest_connection(post_constraint)
-            
-            if pre_conn and post_conn and pre_conn['path_id'] != constrained_segment['path_id']:
-                # 找到连接这两个连接点的主干路径
-                connecting_path = planner.plan_path(
-                    0,  # 临时车辆ID
-                    pre_conn['position'],
-                    post_conn['position'],
-                    use_backbone=True,
-                    check_conflicts=False
-                )
-                
-                if connecting_path:
-                    # 构建完整路径
-                    # 1. 起点到pre_constraint
-                    start_to_pre = current_path[:constrained_segment['start_index']]
-                    
-                    # 2. 连接路径
-                    # 3. post_constraint到终点
-                    post_to_end = current_path[constrained_segment['end_index']+1:]
-                    
-                    # 组合路径
-                    alternative_path = start_to_pre + connecting_path[1:-1] + post_to_end
-                    
-                    return alternative_path
-        except Exception as e:
-            # 如果出现错误，返回None
-            print(f"寻找替代路径错误: {str(e)}")
-            return None
-        
+            path = self.env.path_planner.plan_path(
+                agent_id, 
+                start, 
+                goal,
+                use_backbone=True,  # 仍然使用骨干网络
+                check_conflicts=False
+            )
+            return path
+    
         return None
-    
-    def _calculate_solution_cost(self, solution):
-        """计算解决方案总成本"""
-        total_cost = 0
+
+    def _is_conflict_in_path_segment(self, constraint, path_segment):
+        """
+        判断冲突是否在给定的路径段内
         
-        for vehicle_id, path in solution.items():
-            if path:
-                # 路径长度
-                length = self._calculate_path_length(path)
-                
-                # 流量因子，在高流量路径上行驶成本更高
-                flow_factor = 1.0
-                backbone_segments = self._identify_backbone_segments(path)
-                
-                for segment in backbone_segments:
-                    path_id = segment['path_id']
-                    if path_id in self.backbone_network.paths:
-                        # 获取流量
-                        traffic_flow = self.backbone_network.paths[path_id].get('traffic_flow', 0)
-                        capacity = self.backbone_network.paths[path_id].get('capacity', 1)
-                        
-                        # 流量比例
-                        flow_ratio = min(1.0, traffic_flow / max(1, capacity))
-                        
-                        # 增加流量因子
-                        flow_factor += flow_ratio * 0.2  # 最多增加20%成本
-                
-                # 计算路径成本
-                path_cost = length * flow_factor
-                
-                # 添加到总成本
-                total_cost += path_cost
-        
-        return total_cost
-    
-    def _calculate_path_length(self, path):
-        """计算路径总长度"""
-        if not path or len(path) < 2:
-            return 0
+        Args:
+            constraint: 约束对象
+            path_segment: 路径段
             
-        length = 0
-        for i in range(len(path) - 1):
-            length += self._calculate_distance(path[i], path[i + 1])
+        Returns:
+            bool: 冲突是否在路径段内
+        """
+        if not path_segment or not constraint.location:
+            return False
         
-        return length
-    
-    def _calculate_distance(self, pos1, pos2):
-        """计算两点之间的欧几里得距离"""
-        return ((pos1[0] - pos2[0]) ** 2 + (pos1[1] - pos2[1]) ** 2) ** 0.5
-    
-    def _is_same_point(self, pos1, pos2, tolerance=0.1):
-        """判断两个点是否相同（考虑误差）"""
-        return self._calculate_distance(pos1, pos2) < tolerance
+        # 对于点冲突，检查是否有点接近约束位置
+        min_dist = float('inf')
+        for point in path_segment:
+            dist = self._calculate_distance(point, constraint.location)
+            min_dist = min(min_dist, dist)
+        
+        # 如果最小距离小于阈值，认为冲突在此路径段
+        return min_dist < 5.0  # 5.0是阈值，可以调整
+
+    def _merge_paths(self, path1, path2, path3):
+        """
+        合并多个路径段，避免重复点
+        
+        Args:
+            path1, path2, path3: 要合并的路径段
+            
+        Returns:
+            list: 合并后的路径
+        """
+        if not path1:
+            if not path2:
+                return path3 or []
+            if not path3:
+                return path2 or []
+            # 合并path2和path3
+            if self._is_same_point(path2[-1], path3[0]):
+                return path2 + path3[1:]
+            return path2 + path3
+        
+        if not path2:
+            if not path3:
+                return path1 or []
+            # 合并path1和path3
+            if self._is_same_point(path1[-1], path3[0]):
+                return path1 + path3[1:]
+            return path1 + path3
+        
+        # 合并所有三段
+        merged = path1[:]
+        if self._is_same_point(path1[-1], path2[0]):
+            merged = merged[:-1] + path2
+        else:
+            merged = merged + path2
+        
+        if path3:
+            if self._is_same_point(merged[-1], path3[0]):
+                merged = merged[:-1] + path3
+            else:
+                merged = merged + path3
+        
+        return merged
+        
+    def _is_same_point(self, p1, p2, tolerance=0.5):
+        """判断两点是否相同（考虑误差）"""
+        if not p1 or not p2:
+            return False
+            
+        # 提取坐标
+        x1 = p1[0] if len(p1) > 0 else 0
+        y1 = p1[1] if len(p1) > 1 else 0
+        x2 = p2[0] if len(p2) > 0 else 0
+        y2 = p2[1] if len(p2) > 1 else 0
+        
+        # 计算距离并判断是否小于容差
+        dist = ((x1 - x2) ** 2 + (y1 - y2) ** 2) ** 0.5
+        return dist < tolerance
     
     def _is_direction_conflict(self, path_id, start, end):
         """检查方向是否与路径定义的方向冲突"""
