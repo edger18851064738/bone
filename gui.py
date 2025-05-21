@@ -446,7 +446,7 @@ class BackbonePathVisualizer(QGraphicsItemGroup):
             # 不同类型不同样式
             if conn_type == 'endpoint':
                 # 终点连接，较大
-                radius = 2.5
+                radius = 1.5
                 color = QColor(220, 120, 40)  # 橙色
             else:
                 # 中间路径连接，较小
@@ -507,7 +507,7 @@ class BackbonePathVisualizer(QGraphicsItemGroup):
             )
             
             node_item.setBrush(QBrush(color))
-            node_item.setPen(QPen(Qt.black, 0.8))
+            node_item.setPen(QPen(Qt.black, 0.5))
             
             # 添加标签
             label_item = QGraphicsTextItem(node_id)
@@ -574,7 +574,7 @@ class PathGraphicsItem(QGraphicsPathItem):
             gradient.setColorAt(1, QColor(200, 0, 100, 180))  # 终点为紫色
         
         # 改进线条样式
-        pen = QPen(gradient, 0.8)  # 增加线宽使路径更明显
+        pen = QPen(gradient, 0.5)  # 增加线宽使路径更明显
         pen.setStyle(Qt.DashLine)
         pen.setDashPattern([5, 3])  # 更美观的虚线模式
         self.setPen(pen)
@@ -868,7 +868,7 @@ class MineGraphicsScene(QGraphicsScene):
             area_radius = 8
             area = QGraphicsEllipseItem(x - area_radius/2, y - area_radius/2, area_radius, area_radius)
             area.setBrush(QBrush(QColor(200, 255, 200, 120)))  # 浅绿色，半透明
-            area.setPen(QPen(QColor(0, 120, 0), 0.8))
+            area.setPen(QPen(QColor(0, 120, 0), 0.5))
             area.setZValue(-20)
             self.addItem(area)
             self.loading_point_items.append(area)
@@ -920,7 +920,7 @@ class MineGraphicsScene(QGraphicsScene):
             area_radius = 8
             area = QGraphicsEllipseItem(x - area_radius/2, y - area_radius/2, area_radius, area_radius)
             area.setBrush(QBrush(QColor(255, 200, 200, 120)))  # 浅红色，半透明
-            area.setPen(QPen(QColor(120, 0, 0), 0.8))
+            area.setPen(QPen(QColor(120, 0, 0), 0.5))
             area.setZValue(-20)
             self.addItem(area)
             self.unloading_point_items.append(area)
