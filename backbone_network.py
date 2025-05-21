@@ -2,6 +2,8 @@ import math
 import numpy as np
 from collections import defaultdict
 
+from RRT import RRTPlanner  # 导入RRT规划器
+
 class BackbonePathNetwork:
     """主干路径网络，管理预计算的最优路径
     
@@ -25,7 +27,7 @@ class BackbonePathNetwork:
         self.paths = {}               # 路径字典 {path_id: path_data}
         self.nodes = {}               # 节点字典 {node_id: node_data}
         self.path_graph = {}          # 路径连接图，用于路由
-        
+        self.connections = {}
         # 规划器缓存
         self.planner = None
     
@@ -52,9 +54,98 @@ class BackbonePathNetwork:
         
         # 4. 创建路径连接图用于路由
         self._build_path_graph()
-        
+        self._generate_connection_points()        
         return self.paths
+
+    def _generate_connection_points(self):
+        """创建路径连接点"""
+        self.connections = {}
+        connection_id = 0
         
+        # 从每条路径中添加起点和终点作为连接点
+        for path_id, path_data in self.paths.items():
+            # 起点
+            start_pos = path_data['start']['position']
+            start_id = f"conn_{connection_id}"
+            connection_id += 1
+            self.connections[start_id] = {
+                'position': start_pos,
+                'type': 'endpoint',
+                'paths': [path_id]
+            }
+            
+            # 终点
+            end_pos = path_data['end']['position']
+            end_id = f"conn_{connection_id}"
+            connection_id += 1
+            self.connections[end_id] = {
+                'position': end_pos,
+                'type': 'endpoint',
+                'paths': [path_id]
+            }
+    def find_nearest_connection(self, position, max_distance=5.0):
+        """查找最靠近给定位置的连接点
+        
+        Args:
+            position: 位置坐标 (x, y) 或 (x, y, theta)
+            max_distance: 最大搜索距离
+            
+        Returns:
+            dict: 连接点信息，如果没找到则返回None
+        """
+        nearest_connection = None
+        min_dist = float('inf')
+        
+        # 遍历所有连接点
+        for conn_id, conn_data in self.connections.items():
+            conn_pos = conn_data['position']
+            dist = self._calculate_distance(position, conn_pos)
+            
+            if dist < min_dist and dist <= max_distance:
+                min_dist = dist
+                nearest_connection = conn_data.copy()  # 复制一份避免修改原始数据
+                nearest_connection['id'] = conn_id
+                nearest_connection['distance'] = dist
+        
+        return nearest_connection
+
+    def _is_turning_point(self, prev, curr, next_point):
+        """判断是否是转弯点，用于添加连接点"""
+        # 提取坐标
+        x0, y0 = prev[0], prev[1]
+        x1, y1 = curr[0], curr[1]
+        x2, y2 = next_point[0], next_point[1]
+        
+        # 计算方向向量
+        dx1, dy1 = x1 - x0, y1 - y0
+        dx2, dy2 = x2 - x1, y2 - y1
+        
+        # 归一化向量
+        len1 = math.sqrt(dx1*dx1 + dy1*dy1)
+        len2 = math.sqrt(dx2*dx2 + dy2*dy2)
+        
+        if len1 < 0.001 or len2 < 0.001:
+            return False
+            
+        dx1, dy1 = dx1/len1, dy1/len1
+        dx2, dy2 = dx2/len2, dy2/len2
+        
+        # 计算向量夹角余弦值
+        cos_angle = dx1*dx2 + dy1*dy2
+        
+        # 如果夹角大于30度，认为是转弯点
+        return cos_angle < 0.866  # cos(30度) ≈ 0.866
+    def _is_valid_position(self, x, y):
+        """检查位置是否有效（不是障碍物）"""
+        if not hasattr(self.env, 'grid'):
+            return True
+            
+        # 检查是否在地图范围内
+        if x < 0 or x >= self.env.width or y < 0 or y >= self.env.height:
+            return False
+            
+        # 检查是否是障碍物 (0=可通行, 1=障碍物)
+        return self.env.grid[x, y] == 0
     def _identify_key_points(self):
         """识别所有关键点"""
         key_points = []
@@ -303,7 +394,7 @@ class BackbonePathNetwork:
                     }
         
         return nearest_info
-    
+     
     # 新增方法：获取可达点
     def find_accessible_points(self, position, rrt_planner, max_candidates=5, sampling_step=10):
         """查找可通过RRT从当前位置到达的骨干路径点
@@ -601,6 +692,8 @@ class BackbonePathNetwork:
         # 最小容量
         return max(1, int(capacity))
     
+
+
     def _create_planner(self):
         """创建RRT规划器用于生成初始路径
         
@@ -613,8 +706,18 @@ class BackbonePathNetwork:
         if hasattr(self.env, 'rrt_planner') and self.env.rrt_planner:
             return self.env.rrt_planner
             
-        # 否则使用SimplePlanner作为后备
-        return SimplePlanner(self.env)
+        # 否则创建新的RRTPlanner (不再使用SimplePlanner作为后备)
+        try:
+            return RRTPlanner(
+                self.env, 
+                vehicle_length=5.0,  # 可根据实际需求调整这些参数
+                vehicle_width=2.0,
+                turning_radius=5.0,
+                step_size=0.8
+            )
+        except Exception as e:
+            print(f"警告: 无法创建RRTPlanner，将使用SimplePlanner作为后备: {e}")
+            return SimplePlanner(self.env)
     
     def update_traffic_flow(self, path_id, delta=1):
         """更新路径的交通流量

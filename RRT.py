@@ -319,7 +319,61 @@ class RRTPlanner:
                         f"替换了 {old_len} 个点为 {new_len} 个点")
         
         return optimized_path
-    
+    def is_path_possible(self, start, goal):
+        """检查是否可以在起点和终点之间规划路径
+        
+        简单实现，检查两点连线是否穿越障碍物。
+        
+        Args:
+            start: 起点坐标
+            goal: 终点坐标
+            
+        Returns:
+            bool: 是否可能有路径
+        """
+        # 提取坐标
+        start_x = int(start[0]) if len(start) > 0 else 0
+        start_y = int(start[1]) if len(start) > 1 else 0
+        goal_x = int(goal[0]) if len(goal) > 0 else 0
+        goal_y = int(goal[1]) if len(goal) > 1 else 0
+        
+        # 检查两点是否在障碍物上
+        if (not self._is_valid_position(start_x, start_y) or 
+            not self._is_valid_position(goal_x, goal_y)):
+            return False
+        
+        # 使用Bresenham算法检查线段是否穿越障碍物
+        x, y = start_x, start_y
+        dx = abs(goal_x - start_x)
+        dy = abs(goal_y - start_y)
+        sx = 1 if start_x < goal_x else -1
+        sy = 1 if start_y < goal_y else -1
+        err = dx - dy
+        
+        while x != goal_x or y != goal_y:
+            if not self._is_valid_position(x, y):
+                return False
+                
+            e2 = 2 * err
+            if e2 > -dy:
+                err -= dy
+                x += sx
+            if e2 < dx:
+                err += dx
+                y += sy
+        
+        return True    
+    def _is_valid_position(self, x, y):
+        """检查位置是否有效（不是障碍物）"""
+        if not hasattr(self.env, 'grid'):
+            return True
+            
+        # 检查是否在地图范围内
+        if x < 0 or x >= self.env.width or y < 0 or y >= self.env.height:
+            return False
+            
+        # 检查是否是障碍物 (0=可通行, 1=障碍物)
+        return self.env.grid[x, y] == 0       
     def _identify_turn_sections(self, path, angle_threshold=0.3):
         """
         识别路径中的转弯部分

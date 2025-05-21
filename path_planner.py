@@ -1,7 +1,7 @@
 import math
 import numpy as np
 from collections import defaultdict
-
+from RRT import RRTPlanner
 class PathPlanner:
     """路径规划器，连接车辆与主干路径网络
     
@@ -20,7 +20,22 @@ class PathPlanner:
         """
         self.env = env
         self.backbone_network = backbone_network
-        self.rrt_planner = rrt_planner  # 用户的双向混合RRT规划器
+        if rrt_planner is None:
+            try:
+                self.rrt_planner = RRTPlanner(
+                    env,
+                    vehicle_length=6.0,  # 可根据实际需求调整这些参数
+                    vehicle_width=3.0,
+                    turning_radius=8.0,
+                    step_size=0.6
+                )
+                print("已自动创建RRTPlanner实例")
+            except Exception as e:
+                print(f"警告: 无法创建RRTPlanner: {e}")
+                self.rrt_planner = None
+        else:
+            self.rrt_planner = rrt_planner
+
         self.traffic_manager = traffic_manager
         self.route_cache = {}  # 路由缓存 {(start, goal): path}
         self.max_rrt_attempts = 3  # RRT规划最大尝试次数
