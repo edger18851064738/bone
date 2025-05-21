@@ -306,7 +306,7 @@ class VehicleGraphicsItem(QGraphicsItemGroup):
         self.update_position()
     
     def update_position(self):
-        """更新车辆位置和朝向"""
+        """更新车辆位置和朝向 - 修复版"""
         # 确保position是一个有效的元组，包含三个值：x, y, theta
         if not self.position or len(self.position) < 3:
             return
@@ -316,29 +316,29 @@ class VehicleGraphicsItem(QGraphicsItemGroup):
         # 创建车辆多边形
         polygon = QPolygonF()
         
-        # 计算车辆四个角点的相对坐标
+        # 计算车辆四个角点的相对坐标 - 修改为默认沿Y轴方向
         half_length = self.vehicle_length / 2
         half_width = self.vehicle_width / 2
         corners_relative = [
-            QPointF(half_width, half_length),     # 前右
-            QPointF(-half_width, half_length),    # 前左
-            QPointF(-half_width, -half_length),   # 后左
-            QPointF(half_width, -half_length)     # 后右
+            QPointF(half_length, half_width),     # 前右
+            QPointF(half_length, -half_width),    # 前左
+            QPointF(-half_length, -half_width),   # 后左
+            QPointF(-half_length, half_width)     # 后右
         ]
         
         # 创建变换矩阵
         transform = QTransform()
         transform.rotate(theta * 180 / math.pi)  # 旋转(角度制)
-        transform.translate(x, y)  # 平移
         
-        # 应用变换并添加到多边形
+        # 应用旋转，然后添加到多边形
         for corner in corners_relative:
-            polygon.append(transform.map(corner))
+            rotated_corner = transform.map(corner)
+            polygon.append(QPointF(x + rotated_corner.x(), y + rotated_corner.y()))
         
         # 设置多边形
         self.vehicle_body.setPolygon(polygon)
         
-        # 更新标签位置
+        # 更新标签位置 - 固定偏移，确保位置一致
         self.vehicle_label.setPos(x - 1.5, y - 1.5)
         
         # 状态标签显示在车辆下方
@@ -431,7 +431,7 @@ class BackbonePathVisualizer(QGraphicsItemGroup):
             gradient.setColorAt(0, QColor(40, 120, 180, 180))  # 起点颜色
             gradient.setColorAt(1, QColor(120, 40, 180, 180))  # 终点颜色
             
-            pen = QPen(gradient, 2.0)  # 粗线路径线
+            pen = QPen(gradient, 0.5)  # 粗线路径线
             path_item.setPen(pen)
             
             # 添加到组
@@ -489,12 +489,12 @@ class BackbonePathVisualizer(QGraphicsItemGroup):
             
             # 不同类型不同样式
             if node_type == 'loading_point':
-                # 装载点，较大
-                radius = 4.0
+                # 装载点
+                radius = 3.0
                 color = QColor(0, 180, 0)  # 绿色
             elif node_type == 'unloading_point':
-                # 卸载点，较大
-                radius = 4.0
+                # 卸载点
+                radius = 3.0
                 color = QColor(180, 0, 0)  # 红色
             else:
                 # 其他点，中等大小
@@ -2533,6 +2533,9 @@ class MineGUI(QMainWindow):
             # 对于ECBSVehicleScheduler，update方法包括冲突检测和解决
             self.vehicle_scheduler.update(time_step)
             
+            # 同步车辆状态
+            self._synchronize_vehicle_statuses()
+            
             # 检查是否有任何活跃的冲突
             has_conflicts = False
             if hasattr(self.traffic_manager, 'has_conflict'):
@@ -2551,7 +2554,39 @@ class MineGUI(QMainWindow):
         if progress >= 100:
             self.pause_simulation()
             self.log("模拟完成", "success")
-    
+    def _synchronize_vehicle_statuses(self):
+        """确保车辆状态根据其行为正确更新"""
+        if not self.env:
+            return
+            
+        for vehicle_id, vehicle_data in self.env.vehicles.items():
+            # 检查车辆是否有路径和目标但状态不是moving
+            if 'path' in vehicle_data and vehicle_data['path'] and len(vehicle_data['path']) > 1:
+                path_index = vehicle_data.get('path_index', 0)
+                
+                # 如果还没到达终点
+                if path_index < len(vehicle_data['path']) - 1:
+                    # 如果车辆状态不是moving，将其更新为moving
+                    if vehicle_data.get('status') != 'moving':
+                        vehicle_data['status'] = 'moving'
+                        print(f"Vehicle {vehicle_id} status updated to 'moving'")
+                        
+                    # 确保有正确的朝向角度
+                    current_point = vehicle_data['path'][path_index]
+                    next_point = vehicle_data['path'][path_index + 1]
+                    
+                    # 获取方向向量
+                    dx = next_point[0] - current_point[0]
+                    dy = next_point[1] - current_point[1]
+                    
+                    # 只有在有明显位移时才更新朝向
+                    if abs(dx) > 0.01 or abs(dy) > 0.01:
+                        # 计算车辆朝向角度
+                        theta = math.atan2(dy, dx)
+                        
+                        # 更新位置中的朝向角度
+                        x, y, _ = vehicle_data['position']
+                        vehicle_data['position'] = (x, y, theta)    
     # 车辆操作方法
     def assign_vehicle_task(self):
         """使用ECBS调度分配任务给当前选中的车辆"""
