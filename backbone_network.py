@@ -396,43 +396,190 @@ class BackbonePathNetwork:
         return nearest_info
      
     # 新增方法：获取可达点
-    def find_accessible_points(self, position, rrt_planner, max_candidates=5, sampling_step=10):
-        """查找可通过RRT从当前位置到达的骨干路径点
+    def find_accessible_points(self, position, rrt_planner, max_candidates=5, sampling_step=10, max_distance=20.0):
+        """
+        查找可通过RRT从当前位置到达的骨干路径点 - 增强版
         
         Args:
             position: 起点位置
             rrt_planner: RRT路径规划器
             max_candidates: 最大候选点数
             sampling_step: 路径采样步长
+            max_distance: 最大搜索距离
             
         Returns:
             list: 可达点信息列表，按距离排序
         """
         accessible_points = []
         
-        # 遍历所有骨干路径
-        for path_id, path_data in self.paths.items():
-            path = path_data['path']
+        # 首先检查连接点 - 更好的入口点
+        connections = self.connections.copy()
+        for conn_id, conn_data in connections.items():
+            conn_pos = conn_data['position']
+            distance = self._calculate_distance(position, conn_pos)
             
-            # 采样路径点（避免检查过多点）
-            for idx in range(0, len(path), sampling_step):
-                target = path[idx]
-                
-                # 尝试用RRT规划到此点
-                if rrt_planner.is_path_possible(position, target):
-                    accessible_points.append({
-                        'path_id': path_id,
-                        'path_index': idx,
-                        'position': target,
-                        'distance': self._calculate_distance(position, target)
-                    })
+            # 如果距离在阈值内，检查是否可达
+            if distance < max_distance:
+                if rrt_planner.is_path_possible(position, conn_pos):
+                    # 创建详细的连接点信息
+                    path_id = None
+                    path_index = 0
                     
-                    # 找到足够多的候选点后停止
-                    if len(accessible_points) >= max_candidates:
-                        break
+                    # 查找对应的路径ID和索引
+                    if 'paths' in conn_data and conn_data['paths']:
+                        path_id = conn_data['paths'][0]  # 使用第一条相关路径
+                        
+                        # 查找连接点在路径中的索引
+                        if path_id in self.paths:
+                            path = self.paths[path_id]['path']
+                            for i, point in enumerate(path):
+                                if self._is_same_point(point, conn_pos):
+                                    path_index = i
+                                    break
+                    
+                    # 添加到可达点列表
+                    accessible_points.append({
+                        'conn_id': conn_id,
+                        'path_id': path_id,
+                        'path_index': path_index,
+                        'position': conn_pos,
+                        'distance': distance,
+                        'type': 'connection'
+                    })
+        
+        # 如果连接点不足，再检查路径点
+        if len(accessible_points) < max_candidates:
+            # 遍历所有骨干路径
+            for path_id, path_data in self.paths.items():
+                path = path_data['path']
+                
+                # 采样路径点（避免检查过多点）
+                for idx in range(0, len(path), sampling_step):
+                    target = path[idx]
+                    distance = self._calculate_distance(position, target)
+                    
+                    # 如果距离在阈值内，检查是否可达
+                    if distance < max_distance and rrt_planner.is_path_possible(position, target):
+                        accessible_points.append({
+                            'conn_id': None,
+                            'path_id': path_id,
+                            'path_index': idx,
+                            'position': target,
+                            'distance': distance,
+                            'type': 'path_point'
+                        })
+                        
+                        # 找到足够多的候选点后停止
+                        if len(accessible_points) >= max_candidates:
+                            break
+                
+                if len(accessible_points) >= max_candidates:
+                    break
         
         # 按距离排序
         return sorted(accessible_points, key=lambda x: x['distance'])
+
+    def get_path_segment(self, path_id, start_index, end_index):
+        """
+        获取路径的一个段 - 增强版，支持不同路径之间的段
+        
+        Args:
+            path_id (str): 路径ID或路径ID列表(用':'分隔)
+            start_index (int): 起始索引
+            end_index (int): 结束索引
+            
+        Returns:
+            list or None: 路径段点列表，如果路径不存在则返回None
+        """
+        if ':' in path_id:
+            # 多段路径处理
+            path_ids = path_id.split(':')
+            if len(path_ids) != 2:
+                return None
+            
+            start_path_id, end_path_id = path_ids
+            
+            # 获取两条路径
+            if start_path_id not in self.paths or end_path_id not in self.paths:
+                return None
+            
+            start_path = self.paths[start_path_id]['path']
+            end_path = self.paths[end_path_id]['path']
+            
+            # 处理同一路径的情况
+            if start_path_id == end_path_id:
+                return self._get_single_path_segment(start_path_id, start_index, end_index)
+            
+            # 在主干网络中查找路径
+            connecting_paths = self.find_path(start_path_id, end_path_id)
+            
+            if not connecting_paths:
+                return None
+            
+            # 构建完整路径
+            full_path = []
+            
+            # 添加第一段 - 从start_index到路径末尾
+            if start_index < len(start_path):
+                full_path.extend(start_path[start_index:])
+            
+            # 添加中间连接路径 - 跳过第一条路径和最后一条路径
+            for i, conn_path_id in enumerate(connecting_paths[1:-1], 1):
+                if conn_path_id in self.paths:
+                    conn_path = self.paths[conn_path_id]['path']
+                    # 如果不是第一段，跳过第一个点以避免重复
+                    if i > 1:
+                        conn_path = conn_path[1:]
+                    full_path.extend(conn_path)
+            
+            # 添加最后一段 - 从路径开始到end_index
+            if end_index < len(end_path):
+                end_segment = end_path[:end_index+1]
+                # 如果不是第一段且第一个点重复，跳过
+                if full_path and self._is_same_point(full_path[-1], end_segment[0]):
+                    end_segment = end_segment[1:]
+                full_path.extend(end_segment)
+            
+            return full_path
+        else:
+            # 单一路径处理
+            return self._get_single_path_segment(path_id, start_index, end_index)
+
+    def _get_single_path_segment(self, path_id, start_index, end_index):
+        """获取单一路径的段"""
+        if path_id not in self.paths:
+            return None
+            
+        path = self.paths[path_id]['path']
+        
+        if not path:
+            return None
+            
+        # 确保索引有效
+        start_index = max(0, min(start_index, len(path) - 1))
+        end_index = max(0, min(end_index, len(path) - 1))
+        
+        # 根据索引大小决定方向
+        if start_index <= end_index:
+            return path[start_index:end_index + 1]
+        else:
+            # 如果起始索引大于结束索引，则需要反转路径段
+            return list(reversed(path[end_index:start_index + 1]))
+
+    def _is_same_point(self, p1, p2, tolerance=0.5):
+        """判断两点是否相同（考虑误差）"""
+        if not p1 or not p2:
+            return False
+            
+        # 提取坐标
+        x1 = p1[0] if len(p1) > 0 else 0
+        y1 = p1[1] if len(p1) > 1 else 0
+        x2 = p2[0] if len(p2) > 0 else 0
+        y2 = p2[1] if len(p2) > 1 else 0
+        
+        # 计算距离并判断是否小于容差
+        dist = ((x1 - x2) ** 2 + (y1 - y2) ** 2) ** 0.5
+        return dist < tolerance
     
     def find_path(self, start_id, end_id):
         """在主干网络中查找从起点到终点的最佳路径

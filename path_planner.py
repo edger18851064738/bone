@@ -69,7 +69,8 @@ class PathPlanner:
         self.traffic_manager = traffic_manager
     
     def plan_path(self, vehicle_id, start, goal, use_backbone=True, check_conflicts=True):
-        """规划从起点到终点的完整路径
+        """
+        规划从起点到终点的完整路径 - 增强三段规划支持
         
         Args:
             vehicle_id: 车辆ID
@@ -98,7 +99,7 @@ class PathPlanner:
         
         # 使用骨干网络辅助规划
         if use_backbone and self.backbone_network:
-            path = self._plan_with_backbone_and_rrt(vehicle_id, start, goal)
+            path, path_structure = self._plan_structured_path(vehicle_id, start, goal)
             
             # 路径验证
             if path and self.path_validation_enabled and not self._validate_path(path):
@@ -150,6 +151,115 @@ class PathPlanner:
         if self.debug:
             print(f"[PathPlanner] 路径规划失败: {start} -> {goal}")
         return None
+
+    def _plan_structured_path(self, vehicle_id, start, goal):
+        """
+        规划具有明确三段结构的路径
+        
+        Args:
+            vehicle_id: 车辆ID
+            start: 起点
+            goal: 终点
+            
+        Returns:
+            tuple: (路径点列表, 路径结构)
+        """
+        # 第1步: 寻找起点和终点附近的骨干网络接入点
+        start_candidates = self.backbone_network.find_accessible_points(
+            start, self.rrt_planner, max_candidates=3
+        )
+        
+        if not start_candidates:
+            if self.debug:
+                print(f"[PathPlanner] 无法从起点 {start} 到达任何骨干路径点")
+            return self._plan_direct_path(start, goal), {'to_backbone_path': None}
+                
+        # 寻找终点附近可通过RRT到达的骨干路径点
+        goal_candidates = self.backbone_network.find_accessible_points(
+            goal, self.rrt_planner, max_candidates=3
+        )
+        
+        if not goal_candidates:
+            if self.debug:
+                print(f"[PathPlanner] 无法从任何骨干路径点到达终点 {goal}")
+            return self._plan_direct_path(start, goal), {'to_backbone_path': None}
+        
+        # 第2步: 遍历可能的组合，找出最佳路径
+        best_path = None
+        best_structure = None
+        best_length = float('inf')
+        
+        for start_point in start_candidates[:2]:  # 限制尝试次数
+            for goal_point in goal_candidates[:2]:
+                # 规划三段路径
+                
+                # a. 从起点到骨干入口点
+                path_to_backbone = self._plan_local_path(
+                    start, start_point['position']
+                )
+                if not path_to_backbone:
+                    continue
+                    
+                # b. 在骨干网络中的路径
+                backbone_path = self._get_backbone_segment(
+                    start_point['path_id'],
+                    start_point['path_index'],
+                    goal_point['path_id'],
+                    goal_point['path_index']
+                )
+                if not backbone_path:
+                    continue
+                    
+                # c. 从骨干出口点到终点
+                path_from_backbone = self._plan_local_path(
+                    goal_point['position'], goal
+                )
+                if not path_from_backbone:
+                    continue
+                
+                # 合并三段路径
+                complete_path = self._merge_paths(
+                    path_to_backbone, backbone_path, path_from_backbone
+                )
+                
+                # 验证完整路径
+                if self.path_validation_enabled and not self._validate_path(complete_path):
+                    continue
+                
+                # 计算路径长度
+                path_length = self._calculate_path_length(complete_path)
+                
+                # 如果更短，更新最佳路径
+                if path_length < best_length:
+                    best_path = complete_path
+                    best_length = path_length
+                    best_structure = {
+                        'entry_point': start_point,
+                        'exit_point': goal_point,
+                        'backbone_segment': f"{start_point['path_id']}:{goal_point['path_id']}",
+                        'to_backbone_path': path_to_backbone,
+                        'backbone_path': backbone_path,
+                        'from_backbone_path': path_from_backbone
+                    }
+        
+        # 如果找到有效路径，进行平滑处理
+        if best_path and self.path_smoothing_enabled:
+            # 分别平滑三个部分，保留三段式结构
+            if best_structure:
+                smoothed_to_backbone = self._smooth_path(best_structure['to_backbone_path'])
+                smoothed_backbone = best_structure['backbone_path']  # 骨干部分通常已经平滑
+                smoothed_from_backbone = self._smooth_path(best_structure['from_backbone_path'])
+                
+                # 重新合并
+                best_path = self._merge_paths(smoothed_to_backbone, smoothed_backbone, smoothed_from_backbone)
+                
+                # 更新结构信息
+                best_structure['to_backbone_path'] = smoothed_to_backbone
+                best_structure['from_backbone_path'] = smoothed_from_backbone
+            else:
+                best_path = self._smooth_path(best_path)
+        
+        return best_path, best_structure
     
     def _plan_with_backbone_and_rrt(self, vehicle_id, start, goal):
         """结合骨干网络和RRT进行规划
