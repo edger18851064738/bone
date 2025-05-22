@@ -441,9 +441,13 @@ class VehicleScheduler:
         task.assigned_vehicle = vehicle_id
         task.start_time = self.env.current_time if hasattr(self.env, 'current_time') else 0
         
-        # 更新车辆状态
+        # 更新车辆状态 - 修复：同步更新env.vehicles
         self.vehicle_statuses[vehicle_id]['status'] = 'moving'
         self.vehicle_statuses[vehicle_id]['current_task'] = task_id
+        
+        # 关键修复：同步状态到环境对象
+        if vehicle_id in self.env.vehicles:
+            self.env.vehicles[vehicle_id]['status'] = 'moving'  # 添加这行
         
         # 规划路径
         if self.path_planner:
@@ -677,6 +681,11 @@ class VehicleScheduler:
                         vehicle['path_index'] = path_index
                         vehicle['progress'] = progress
                         
+                        # 确保状态保持moving - 修复点
+                        if vehicle['status'] != 'moving':
+                            vehicle['status'] = 'moving'
+                            status['status'] = 'moving'
+                        
                         # 检查骨干网络转换
                         self._check_backbone_transition(vehicle_id, current_task, path_index)
                 else:
@@ -785,8 +794,9 @@ class VehicleScheduler:
         if task.task_type == 'to_loading':
             # 到达装载点，开始装载
             status['status'] = 'loading'
-            self.env.vehicles[vehicle_id]['status'] = 'loading'
-            self.env.vehicles[vehicle_id]['loading_progress'] = 0
+            if vehicle_id in self.env.vehicles:
+                self.env.vehicles[vehicle_id]['status'] = 'loading'  # 修复：同步状态
+                self.env.vehicles[vehicle_id]['loading_progress'] = 0
             
             # 记录使用的装载点
             if task.loading_point_id is not None:
@@ -795,8 +805,9 @@ class VehicleScheduler:
         elif task.task_type == 'to_unloading':
             # 到达卸载点，开始卸载
             status['status'] = 'unloading'
-            self.env.vehicles[vehicle_id]['status'] = 'unloading'
-            self.env.vehicles[vehicle_id]['unloading_progress'] = 0
+            if vehicle_id in self.env.vehicles:
+                self.env.vehicles[vehicle_id]['status'] = 'unloading'  # 修复：同步状态
+                self.env.vehicles[vehicle_id]['unloading_progress'] = 0
             
             # 记录使用的卸载点
             if task.unloading_point_id is not None:
@@ -807,8 +818,9 @@ class VehicleScheduler:
             self._complete_task(vehicle_id, task_id)
             
             # 更新完成循环计数
-            self.env.vehicles[vehicle_id]['completed_cycles'] = \
-                self.env.vehicles[vehicle_id].get('completed_cycles', 0) + 1
+            if vehicle_id in self.env.vehicles:
+                self.env.vehicles[vehicle_id]['completed_cycles'] = \
+                    self.env.vehicles[vehicle_id].get('completed_cycles', 0) + 1
             
             # 处理下一轮任务
             self._handle_cycle_completion(vehicle_id)
@@ -833,7 +845,8 @@ class VehicleScheduler:
                 status = self.vehicle_statuses[vehicle_id]
                 status['status'] = 'idle'
                 status['current_task'] = None
-                self.env.vehicles[vehicle_id]['status'] = 'idle'
+                if vehicle_id in self.env.vehicles:
+                    self.env.vehicles[vehicle_id]['status'] = 'idle'  # 修复：同步状态
     
     def _complete_task(self, vehicle_id, task_id):
         """完成任务并更新统计信息"""

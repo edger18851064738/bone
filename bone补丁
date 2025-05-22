@@ -1,608 +1,369 @@
-# 完整的 backbone_network.py 优化补丁
+# 露天矿多车协同调度系统 - 代码架构分析
 
-# 1. 添加到类开头的优化属性
+## 系统总体架构
+
+这是一个基于**骨干路径网络**的多车辆协同调度系统，主要由三个核心模块组成：
+
+```
+┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
+│   GUI模块       │    │  路径规划模块    │    │  骨干网络模块    │
+│   (gui.py)      │◄──►│(path_planner.py)│◄──►│(backbone_network│
+│                 │    │                 │    │     .py)        │
+└─────────────────┘    └─────────────────┘    └─────────────────┘
+        │                        │                        │
+        ▼                        ▼                        ▼
+   用户交互界面              智能路径规划              骨干网络管理
+   任务控制                 多策略选择                空间索引优化
+   可视化显示               质量评估                  连接点生成
+```
+
+## 1. 骨干网络模块 (backbone_network.py)
+
+### 核心概念
+骨干网络是预先构建的高质量路径网络，连接矿场中的关键点（装载点、卸载点、停车区）。
+
+### 主要类：OptimizedBackbonePathNetwork
+
+#### 初始化阶段
+```python
 def __init__(self, env):
-    # ... 现有代码 ...
+    # 核心数据结构
+    self.paths = {}               # 路径字典 {path_id: path_data}
+    self.nodes = {}               # 节点字典 {node_id: node_data}  
+    self.connections = {}         # 连接点字典
+    self.path_graph = {}          # 路径连接图
     
-    # 新增：高级空间索引
+    # 高级空间索引系统（KDTree）
     self.advanced_spatial_index = {
         'connection_kdtree': None,
         'path_kdtree': None,
-        'grid_index': {},  # 网格索引
-        'dirty': True
+        'grid_index': {}
     }
     
-    # 新增：缓存优化
-    self.cache_config = {
-        'max_cache_size': 1000,
-        'ttl': 300,  # 5分钟过期
-        'cleanup_interval': 60  # 1分钟清理一次
-    }
-    self.query_cache = {}
-    self.cache_timestamps = {}
+    # 缓存优化系统
+    self.query_cache = OrderedDict()  # LRU缓存
+```
+
+#### 网络生成流程
+```python
+def generate_network(self, connection_spacing=10, quality_threshold=0.6):
+    """完整的骨干网络生成流程"""
     
-    # 新增：网络拓扑分析
-    self.topology_metrics = {
-        'connectivity_graph': {},
-        'shortest_paths': {},
-        'centrality_scores': {},
-        'last_analysis': 0
-    }
-
-# 2. 空间索引优化
-def _build_spatial_indexes(self):
-    """构建优化的空间索引系统"""
-    try:
-        if not self.connections:
-            return
-        
-        # 构建连接点KD树（使用cKDTree性能更好）
-        from scipy.spatial import cKDTree
-        
-        connection_points = []
-        connection_ids = []
-        
-        for conn_id, conn_data in self.connections.items():
-            pos = conn_data['position']
-            connection_points.append([pos[0], pos[1]])
-            connection_ids.append(conn_id)
-        
-        if connection_points:
-            # 使用优化参数构建KD树
-            self.advanced_spatial_index['connection_kdtree'] = cKDTree(
-                connection_points, 
-                leafsize=16,  # 优化的叶节点大小
-                balanced_tree=True,
-                compact_nodes=True
-            )
-            self.connection_ids = connection_ids
-        
-        # 构建路径点KD树
-        path_points = []
-        path_info = []
-        
-        for path_id, path_data in self.paths.items():
-            path = path_data['path']
-            # 优化：每5个点采样一个，减少索引大小
-            for i, point in enumerate(path[::5]):
-                path_points.append([point[0], point[1]])
-                path_info.append((path_id, i * 5))
-        
-        if path_points:
-            self.advanced_spatial_index['path_kdtree'] = cKDTree(
-                path_points,
-                leafsize=20,
-                balanced_tree=True
-            )
-            self.path_point_info = path_info
-        
-        # 构建网格索引（用于粗粒度快速查询）
-        self._build_grid_index()
-        
-        self.advanced_spatial_index['dirty'] = False
-        self.spatial_index_dirty = False
-        
-    except Exception as e:
-        print(f"构建空间索引失败: {e}")
-        # 回退到简单实现
-        self._build_simple_spatial_index()
-
-def _build_grid_index(self):
-    """构建网格索引用于快速区域查询"""
-    grid_size = 20.0  # 网格大小
+    # 1. 识别关键点（装载点、卸载点、停车区）
+    key_points = self._identify_key_points()
     
-    self.advanced_spatial_index['grid_index'] = {}
+    # 2. 生成关键点间的高质量路径
+    self._generate_paths_between_key_points(key_points, quality_threshold)
     
-    # 为连接点建立网格索引
-    for conn_id, conn_data in self.connections.items():
-        pos = conn_data['position']
-        grid_x = int(pos[0] // grid_size)
-        grid_y = int(pos[1] // grid_size)
-        grid_key = (grid_x, grid_y)
-        
-        if grid_key not in self.advanced_spatial_index['grid_index']:
-            self.advanced_spatial_index['grid_index'][grid_key] = {
-                'connections': [],
-                'paths': set()
-            }
-        
-        self.advanced_spatial_index['grid_index'][grid_key]['connections'].append(conn_id)
-        
-        # 添加相关路径
-        for path_id in conn_data.get('paths', []):
-            self.advanced_spatial_index['grid_index'][grid_key]['paths'].add(path_id)
+    # 3. 智能生成连接点
+    self._generate_intelligent_connection_points(connection_spacing)
+    
+    # 4. 优化所有路径
+    self._optimize_all_paths_advanced()
+    
+    # 5. 建立路径层次结构（primary/secondary/auxiliary）
+    self._build_path_hierarchy()
+    
+    # 6. 构建路径连接图
+    self._build_path_graph()
+    
+    # 7. 构建高级空间索引（KDTree + 网格索引）
+    self._build_spatial_indexes()
+    
+    # 8. 分析拓扑结构
+    self.analyze_network_topology()
+```
 
-def _build_simple_spatial_index(self):
-    """简单的空间索引实现（作为回退）"""
-    self.connection_kdtree = None
-    self.path_point_kdtree = None
-    print("使用简单空间索引")
+#### 核心功能
 
-# 3. 增强的连接点查找
-def find_nearest_connection_optimized(self, position, max_distance=5.0, max_candidates=5):
+**1. 智能连接点查找**
+```python
+def find_nearest_connection_optimized(self, position, max_distance=5.0):
     """超级优化的最近连接点查找"""
-    start_time = time.time()
-    
-    # 检查缓存
-    cache_key = f"conn_{position[0]:.1f}_{position[1]:.1f}_{max_distance}"
-    if self._check_cache(cache_key):
-        return self._get_cache(cache_key)
-    
-    # 重建索引（如果需要）
-    if self.advanced_spatial_index['dirty']:
-        self._build_spatial_indexes()
-    
-    result = None
-    
-    try:
-        # 使用KD树查找
-        if self.advanced_spatial_index['connection_kdtree'] is not None:
-            result = self._kdtree_nearest_connection(position, max_distance, max_candidates)
-        else:
-            # 回退到网格查找
-            result = self._grid_nearest_connection(position, max_distance, max_candidates)
-    except Exception as e:
-        print(f"优化查找失败，使用简单方法: {e}")
-        result = self._simple_nearest_connection(position, max_distance)
-    
-    # 缓存结果
-    if result:
-        self._add_to_cache(cache_key, result)
-    
-    # 更新性能统计
-    query_time = time.time() - start_time
-    self.performance_stats['query_time'] += query_time
-    
-    return result
+    # 使用KDTree进行快速空间查询
+    # 支持缓存机制
+    # 综合评分（距离+质量+优先级+容量）
+```
 
-def _kdtree_nearest_connection(self, position, max_distance, max_candidates):
-    """使用KD树查找最近连接点"""
-    kdtree = self.advanced_spatial_index['connection_kdtree']
+**2. 可达点分析**
+```python
+def find_accessible_points(self, position, rrt_planner, max_candidates=5):  
+    """找到从给定位置可达的骨干网络接入点"""
+    # 结合连接点KDTree和路径点KDTree
+    # 验证路径可达性
+    # 按质量和距离排序
+```
+
+**3. 路径质量评估**
+```python
+def _evaluate_path_quality(self, path):
+    """综合评估路径质量"""
+    # 长度评分 (direct_distance / actual_length)
+    # 平滑度评分 (基于转弯角度)
+    # 转弯复杂度评分
+    # 障碍物间隙评分  
+    # 交通兼容性评分
+    # 加权综合评分
+```
+
+## 2. 路径规划模块 (path_planner.py)
+
+### 主要类：OptimizedPathPlanner
+
+#### 核心设计思想
+采用**多策略路径规划**，根据不同情况选择最适合的规划方法。
+
+#### 规划策略
+```python
+self.planning_strategies = {
+    'backbone_first': self._plan_backbone_first_strategy,      # 骨干优先
+    'direct_optimized': self._plan_direct_optimized_strategy,  # 直接优化
+    'hybrid_multi_path': self._plan_hybrid_multi_path_strategy, # 混合多路径
+    'emergency_fallback': self._plan_emergency_fallback_strategy # 紧急回退
+}
+```
+
+#### 主要规划流程
+```python
+def plan_path(self, vehicle_id, start, goal, use_backbone=True):
+    """完整的路径规划流程"""
     
-    query_point = [position[0], position[1]]
+    # 1. 输入验证
+    if not self._validate_inputs(start, goal): return None
     
-    # 查询候选点
-    try:
-        distances, indices = kdtree.query(
-            query_point,
-            k=min(max_candidates * 2, len(self.connection_ids)),
-            distance_upper_bound=max_distance
+    # 2. 检查缓存
+    cached_result = self._check_cache(cache_key)
+    if cached_result: return cached_result
+    
+    # 3. 多次尝试规划（不同策略）  
+    for attempt in range(max_attempts):
+        path, structure = self.planning_strategies[strategy](
+            vehicle_id, start, goal, use_backbone, attempt
         )
         
-        # 处理单个结果
-        if not hasattr(distances, '__len__'):
-            distances = [distances]
-            indices = [indices]
+        # 4. 路径验证和质量评估
+        if path and self._validate_path_comprehensive(path):
+            quality = self.quality_assessor.evaluate_path(path)
+            if quality > best_quality:
+                best_path, best_quality = path, quality
+    
+    # 5. 后处理优化（平滑、捷径优化）
+    if best_path:
+        best_path = self._post_process_path(best_path)
+    
+    # 6. 冲突检查（与交通管理器协作）
+    if check_conflicts and self.traffic_manager:
+        # 检查并调整路径避免冲突
         
-        best_connections = []
-        
-        for dist, idx in zip(distances, indices):
-            if idx >= len(self.connection_ids) or dist > max_distance:
-                continue
-            
-            conn_id = self.connection_ids[idx]
-            if conn_id in self.connections:
-                conn_data = self.connections[conn_id].copy()
-                conn_data['id'] = conn_id
-                conn_data['distance'] = dist
-                
-                # 计算综合评分
-                score = self._calculate_connection_score(conn_data, dist)
-                conn_data['score'] = score
-                
-                best_connections.append(conn_data)
-        
-        # 按评分排序
-        best_connections.sort(key=lambda x: -x.get('score', 0))
-        
-        return best_connections[0] if best_connections else None
-        
-    except Exception as e:
-        print(f"KD树查询失败: {e}")
-        return None
+    # 7. 缓存结果
+    self._add_to_cache(cache_key, result, quality)
+```
 
-def _grid_nearest_connection(self, position, max_distance, max_candidates):
-    """使用网格索引查找最近连接点"""
-    grid_size = 20.0
-    grid_x = int(position[0] // grid_size)
-    grid_y = int(position[1] // grid_size)
+#### 骨干优先策略（核心）
+```python  
+def _plan_backbone_first_strategy(self, vehicle_id, start, goal, use_backbone, attempt):
+    """骨干网络优先策略 - 三段式路径规划"""
     
-    # 搜索周围的网格
-    search_radius = int(max_distance // grid_size) + 1
-    candidates = []
+    # 1. 找到骨干网络接入点
+    start_candidates = self.backbone_network.find_accessible_points(start, ...)
+    goal_candidates = self.backbone_network.find_accessible_points(goal, ...)
     
-    for dx in range(-search_radius, search_radius + 1):
-        for dy in range(-search_radius, search_radius + 1):
-            grid_key = (grid_x + dx, grid_y + dy)
-            
-            if grid_key in self.advanced_spatial_index['grid_index']:
-                grid_data = self.advanced_spatial_index['grid_index'][grid_key]
-                
-                for conn_id in grid_data['connections']:
-                    if conn_id in self.connections:
-                        conn_data = self.connections[conn_id]
-                        dist = self._calculate_distance(position, conn_data['position'])
-                        
-                        if dist <= max_distance:
-                            conn_copy = conn_data.copy()
-                            conn_copy['id'] = conn_id
-                            conn_copy['distance'] = dist
-                            conn_copy['score'] = self._calculate_connection_score(conn_copy, dist)
-                            candidates.append(conn_copy)
-    
-    # 排序并返回最佳候选
-    candidates.sort(key=lambda x: -x.get('score', 0))
-    return candidates[0] if candidates else None
-
-def _simple_nearest_connection(self, position, max_distance):
-    """简单的最近连接点查找（作为最后回退）"""
-    best_connection = None
-    best_distance = float('inf')
-    
-    for conn_id, conn_data in self.connections.items():
-        dist = self._calculate_distance(position, conn_data['position'])
-        
-        if dist <= max_distance and dist < best_distance:
-            best_distance = dist
-            best_connection = conn_data.copy()
-            best_connection['id'] = conn_id
-            best_connection['distance'] = dist
-    
-    return best_connection
-
-# 4. 缓存管理优化
-def _check_cache(self, cache_key):
-    """检查缓存是否有效"""
-    if cache_key not in self.query_cache:
-        return False
-    
-    # 检查是否过期
-    timestamp = self.cache_timestamps.get(cache_key, 0)
-    current_time = time.time()
-    
-    if current_time - timestamp > self.cache_config['ttl']:
-        # 清除过期缓存
-        del self.query_cache[cache_key]
-        del self.cache_timestamps[cache_key]
-        return False
-    
-    return True
-
-def _get_cache(self, cache_key):
-    """获取缓存结果"""
-    return self.query_cache.get(cache_key)
-
-def _add_to_cache(self, cache_key, result):
-    """添加到缓存"""
-    # 检查缓存大小
-    if len(self.query_cache) >= self.cache_config['max_cache_size']:
-        self._cleanup_cache()
-    
-    self.query_cache[cache_key] = result
-    self.cache_timestamps[cache_key] = time.time()
-
-def _cleanup_cache(self):
-    """清理过期缓存"""
-    current_time = time.time()
-    expired_keys = []
-    
-    for key, timestamp in self.cache_timestamps.items():
-        if current_time - timestamp > self.cache_config['ttl']:
-            expired_keys.append(key)
-    
-    for key in expired_keys:
-        if key in self.query_cache:
-            del self.query_cache[key]
-        if key in self.cache_timestamps:
-            del self.cache_timestamps[key]
-    
-    # 如果还是太多，删除最旧的一半
-    if len(self.query_cache) >= self.cache_config['max_cache_size']:
-        sorted_keys = sorted(
-            self.cache_timestamps.items(),
-            key=lambda x: x[1]
-        )
-        
-        remove_count = len(sorted_keys) // 2
-        for key, _ in sorted_keys[:remove_count]:
-            if key in self.query_cache:
-                del self.query_cache[key]
-            if key in self.cache_timestamps:
-                del self.cache_timestamps[key]
-
-# 5. 网络拓扑分析
-def analyze_network_topology(self):
-    """分析网络拓扑结构"""
-    current_time = time.time()
-    
-    # 检查是否需要重新分析
-    if (current_time - self.topology_metrics['last_analysis'] < 300 and 
-        self.topology_metrics['connectivity_graph']):
-        return self.topology_metrics
-    
-    print("分析骨干网络拓扑结构...")
-    
-    # 构建连通图
-    self._build_connectivity_graph()
-    
-    # 计算最短路径
-    self._calculate_shortest_paths()
-    
-    # 计算中心性指标
-    self._calculate_centrality_scores()
-    
-    self.topology_metrics['last_analysis'] = current_time
-    
-    return self.topology_metrics
-
-def _build_connectivity_graph(self):
-    """构建连通图"""
-    graph = defaultdict(set)
-    
-    # 基于连接点构建图
-    for conn_data in self.connections.values():
-        connected_paths = conn_data.get('paths', [])
-        
-        # 每个连接点连接的路径彼此相连
-        for i, path1 in enumerate(connected_paths):
-            for j, path2 in enumerate(connected_paths):
-                if i != j and path1 in self.paths and path2 in self.paths:
-                    graph[path1].add(path2)
-                    graph[path2].add(path1)
-    
-    self.topology_metrics['connectivity_graph'] = dict(graph)
-
-def _calculate_shortest_paths(self):
-    """计算关键点之间的最短路径"""
-    graph = self.topology_metrics['connectivity_graph']
-    
-    # 使用Floyd-Warshall算法的简化版本
-    paths = {}
-    all_paths = list(self.paths.keys())
-    
-    for start_path in all_paths:
-        paths[start_path] = {}
-        
-        # BFS找最短路径
-        queue = [(start_path, 0, [start_path])]
-        visited = {start_path}
-        
-        while queue:
-            current_path, distance, path_route = queue.pop(0)
-            paths[start_path][current_path] = {
-                'distance': distance,
-                'route': path_route
-            }
-            
-            # 添加邻居
-            for neighbor in graph.get(current_path, []):
-                if neighbor not in visited:
-                    visited.add(neighbor)
-                    queue.append((neighbor, distance + 1, path_route + [neighbor]))
-    
-    self.topology_metrics['shortest_paths'] = paths
-
-def _calculate_centrality_scores(self):
-    """计算中心性评分"""
-    graph = self.topology_metrics['connectivity_graph']
-    centrality = {}
-    
-    for path_id in self.paths.keys():
-        # 度中心性
-        degree = len(graph.get(path_id, []))
-        
-        # 接近中心性的简化计算
-        shortest_paths = self.topology_metrics['shortest_paths'].get(path_id, {})
-        total_distance = sum(
-            data.get('distance', float('inf')) 
-            for data in shortest_paths.values()
-        )
-        
-        closeness = 1.0 / (total_distance + 1)
-        
-        # 综合中心性评分
-        centrality[path_id] = {
-            'degree': degree,
-            'closeness': closeness,
-            'combined': degree * 0.6 + closeness * 0.4
-        }
-    
-    self.topology_metrics['centrality_scores'] = centrality
-
-# 6. 智能路径规划辅助
-def suggest_optimal_route(self, start_pos, end_pos, preferences=None):
-    """基于拓扑分析建议最优路由"""
-    if not self.topology_metrics.get('connectivity_graph'):
-        self.analyze_network_topology()
-    
-    preferences = preferences or {}
-    
-    # 找到最近的起始和结束路径
-    start_candidates = self.find_accessible_points(start_pos, None, max_candidates=3)
-    end_candidates = self.find_accessible_points(end_pos, None, max_candidates=3)
-    
-    if not start_candidates or not end_candidates:
-        return None
-    
-    best_route = None
-    best_score = float('-inf')
-    
+    # 2. 尝试所有候选组合，选择最优
     for start_point in start_candidates:
-        for end_point in end_candidates:
-            start_path = start_point.get('path_id')
-            end_path = end_point.get('path_id')
-            
-            if start_path and end_path:
-                route_score = self._evaluate_route(
-                    start_path, end_path, preferences
-                )
-                
-                if route_score > best_score:
-                    best_score = route_score
-                    best_route = {
-                        'start_point': start_point,
-                        'end_point': end_point,
-                        'route': self._get_route_details(start_path, end_path),
-                        'score': route_score
-                    }
-    
-    return best_route
+        for goal_point in goal_candidates:
+            # 3. 规划三段路径
+            result = self._plan_three_segment_path(start, goal, start_point, goal_point)
+```
 
-def _evaluate_route(self, start_path, end_path, preferences):
-    """评估路由质量"""
-    shortest_paths = self.topology_metrics.get('shortest_paths', {})
-    centrality_scores = self.topology_metrics.get('centrality_scores', {})
+#### 三段式路径规划
+```python
+def _plan_three_segment_path(self, start, goal, start_point, goal_point):
+    """规划三段式路径：起点->骨干入口->骨干内->骨干出口->终点"""
     
-    # 基础路径距离评分
-    path_info = shortest_paths.get(start_path, {}).get(end_path, {})
-    route_distance = path_info.get('distance', float('inf'))
+    # 第一段：起点到骨干入口（使用RRT）
+    segment1 = self._plan_local_segment(start, start_point['position'])
     
-    if route_distance == float('inf'):
-        return 0
+    # 第二段：骨干网络内路径（使用预构建路径）
+    segment2 = self._plan_backbone_segment(start_point, goal_point) 
     
-    distance_score = 1.0 / (1.0 + route_distance)
+    # 第三段：骨干出口到终点（使用RRT）
+    segment3 = self._plan_local_segment(goal_point['position'], goal)
     
-    # 路径质量评分
-    quality_score = 0
-    route_paths = path_info.get('route', [])
+    # 合并三段路径
+    complete_path = self._merge_path_segments([segment1, segment2, segment3])
     
-    for path_id in route_paths:
-        if path_id in self.paths:
-            path_quality = self.paths[path_id].get('quality_score', 0.5)
-            quality_score += path_quality
+    return complete_path, structure_info, total_cost
+```
+
+### 路径质量评估器：PathQualityAssessor
+```python
+def evaluate_path(self, path):
+    """综合路径质量评估"""
+    scores = {
+        'length_efficiency': self._evaluate_length_efficiency(path),    # 长度效率
+        'smoothness': self._evaluate_smoothness(path),                  # 平滑度  
+        'safety': self._evaluate_safety(path),                          # 安全性
+        'complexity': self._evaluate_complexity(path),                  # 复杂度
+        'clearance': self._evaluate_clearance(path)                     # 间隙
+    }
     
-    if route_paths:
-        quality_score /= len(route_paths)
+    # 加权综合评分
+    total_score = sum(scores[metric] * self.weights[metric] for metric in scores)
+```
+
+## 3. GUI模块 (gui.py)
+
+### 主要类：OptimizedMineGUI
+
+这是系统的用户交互界面，采用PyQt5实现，提供完整的可视化和控制功能。
+
+#### 界面结构
+```
+主窗口 (OptimizedMineGUI)
+├── 左侧控制面板 (QTabWidget)
+│   ├── 环境选项卡 (环境加载、模拟控制)
+│   ├── 路径选项卡 (骨干网络生成、ECBS配置)  
+│   ├── 车辆选项卡 (车辆信息、任务控制)
+│   ├── 任务选项卡 (任务管理、统计信息)
+│   └── 性能选项卡 (实时性能监控)
+├── 右侧显示区域 (MineGraphicsView)
+│   ├── 矿场场景显示
+│   ├── 车辆和路径可视化  
+│   └── 骨干网络显示
+└── 日志和状态栏
+```
+
+#### 核心可视化组件
+
+**1. 增强车辆图形项**
+```python
+class EnhancedVehicleGraphicsItem(QGraphicsItemGroup):
+    """增强的车辆图形项 - 支持路径结构可视化"""
     
-    # 中心性评分
-    centrality_score = 0
-    for path_id in route_paths:
-        centrality_data = centrality_scores.get(path_id, {})
-        centrality_score += centrality_data.get('combined', 0)
+    def update_data(self, vehicle_data):
+        # 更新车辆状态（idle/moving/loading/unloading）
+        # 更新载重指示器
+        # 更新位置和朝向
+```
+
+**2. 路径图形项**  
+```python
+class EnhancedPathGraphicsItem(QGraphicsItemGroup):
+    """增强的路径图形项 - 区分不同路径段"""
     
-    if route_paths:
-        centrality_score /= len(route_paths)
+    def create_structured_path(self):
+        # 起点→骨干: 虚线，亮蓝色
+        # 骨干路径: 实线，粗，绿色  
+        # 骨干→终点: 虚线，红色
+```
+
+**3. 骨干网络可视化**
+```python
+class BackboneNetworkVisualizer(QGraphicsItemGroup):
+    """骨干路径网络可视化组件"""
     
-    # 容量评分
-    capacity_score = 1.0
-    for path_id in route_paths:
-        if path_id in self.paths:
-            utilization = self.paths[path_id].get('utilization', 0)
-            capacity_score *= (1.0 - utilization)
+    def update_visualization(self):
+        self._draw_paths()        # 绘制路径（颜色表示质量）
+        self._draw_connections()  # 绘制连接点
+        self._draw_nodes()        # 绘制关键节点
+        self._draw_traffic_flow() # 绘制交通流指示
+```
+
+#### 任务控制流程
+
+**车辆任务分配流程（关键修复点）：**
+```python
+def goto_selected_loading_point(self):
+    """前往选定的装载点 - 修复版"""
     
-    # 综合评分
-    weights = preferences.get('weights', {
-        'distance': 0.3,
-        'quality': 0.3,
-        'centrality': 0.2,
-        'capacity': 0.2
-    })
+    # 1. 获取选中的车辆ID
+    vehicle_id = self.vehicle_info_panel.vehicle_combo.itemData(current_index)
     
-    total_score = (
-        distance_score * weights.get('distance', 0.3) +
-        quality_score * weights.get('quality', 0.3) +
-        centrality_score * weights.get('centrality', 0.2) +
-        capacity_score * weights.get('capacity', 0.2)
+    # 2. 获取选中的装载点ID（关键修复）
+    loading_point_id = self.vehicle_loading_combo.currentData()
+    
+    # 3. 创建任务，正确设置loading_point_id
+    task = VehicleTask(
+        task_id, 'to_loading', vehicle_position, loading_point,
+        priority=2, 
+        loading_point_id=loading_point_id,  # ✅ 关键修复点
+        unloading_point_id=None
     )
     
-    return total_score
+    # 4. 分配任务给车辆调度器
+    self.vehicle_scheduler.tasks[task_id] = task
+    self.vehicle_scheduler._start_next_task(vehicle_id)
+```
 
-def _get_route_details(self, start_path, end_path):
-    """获取路由详细信息"""
-    shortest_paths = self.topology_metrics.get('shortest_paths', {})
-    path_info = shortest_paths.get(start_path, {}).get(end_path, {})
-    
-    route_paths = path_info.get('route', [])
-    
-    details = {
-        'path_sequence': route_paths,
-        'total_hops': len(route_paths) - 1,
-        'estimated_length': 0,
-        'quality_breakdown': {},
-        'bottlenecks': []
-    }
-    
-    # 计算详细信息
-    for path_id in route_paths:
-        if path_id in self.paths:
-            path_data = self.paths[path_id]
-            details['estimated_length'] += path_data.get('length', 0)
-            details['quality_breakdown'][path_id] = path_data.get('quality_score', 0)
-            
-            # 识别瓶颈
-            utilization = path_data.get('utilization', 0)
-            if utilization > 0.8:
-                details['bottlenecks'].append({
-                    'path_id': path_id,
-                    'utilization': utilization,
-                    'type': 'high_traffic'
-                })
-    
-    return details
+## 系统工作流程
 
-# 7. 实时监控和自适应优化
-def enable_realtime_monitoring(self, interval=30):
-    """启用实时监控"""
-    import threading
-    
-    def monitor_loop():
-        while True:
-            try:
-                # 检查网络健康状况
-                self._check_network_health()
-                
-                # 自适应优化
-                self._adaptive_optimization()
-                
-                # 清理缓存
-                self._cleanup_cache()
-                
-                time.sleep(interval)
-                
-            except Exception as e:
-                print(f"监控循环错误: {e}")
-                time.sleep(interval)
-    
-    monitor_thread = threading.Thread(target=monitor_loop, daemon=True)
-    monitor_thread.start()
-    print(f"启用实时监控，间隔{interval}秒")
+### 1. 系统初始化流程
+```
+1. 加载矿场环境 (load_environment)
+   ├── 解析地图文件
+   ├── 创建Environment对象
+   └── 初始化车辆位置
 
-def _check_network_health(self):
-    """检查网络健康状况"""
-    issues = []
-    
-    # 检查高负载路径
-    for path_id, path_data in self.paths.items():
-        utilization = path_data.get('utilization', 0)
-        if utilization > 0.9:
-            issues.append(f"路径 {path_id} 负载过高: {utilization:.2f}")
-    
-    # 检查低质量路径
-    low_quality_paths = [
-        path_id for path_id, data in self.paths.items()
-        if data.get('quality_score', 1.0) < 0.3
-    ]
-    
-    if low_quality_paths:
-        issues.append(f"发现 {len(low_quality_paths)} 条低质量路径")
-    
-    # 记录问题
-    if issues:
-        self.performance_stats['health_issues'] = issues
-        print(f"网络健康检查发现 {len(issues)} 个问题")
+2. 创建系统组件 (create_system_components)  
+   ├── 创建骨干网络 (OptimizedBackbonePathNetwork)
+   ├── 创建路径规划器 (OptimizedPathPlanner)
+   ├── 创建交通管理器 (OptimizedTrafficManager)
+   └── 创建车辆调度器 (ECBSVehicleScheduler)
 
-def _adaptive_optimization(self):
-    """自适应优化"""
-    # 动态调整缓存大小
-    query_rate = len(self.query_cache) / max(1, time.time() - self.performance_stats.get('start_time', time.time()))
-    
-    if query_rate > 10:  # 高查询率
-        self.cache_config['max_cache_size'] = min(2000, self.cache_config['max_cache_size'] * 1.2)
-    elif query_rate < 2:  # 低查询率
-        self.cache_config['max_cache_size'] = max(500, self.cache_config['max_cache_size'] * 0.8)
-    
-    # 动态调整空间索引
-    if len(self.connections) > 1000 and self.advanced_spatial_index['dirty']:
-        self._build_spatial_indexes()
+3. 生成骨干网络 (generate_backbone_network)
+   ├── 识别关键点
+   ├── 生成高质量路径
+   ├── 构建空间索引
+   └── 拓扑分析
+```
 
-# 这些方法需要添加到 OptimizedBackbonePathNetwork 类中
+### 2. 路径规划流程
+```
+用户发起任务 → GUI收集参数 → 调用路径规划器
+                                    ├── 检查缓存
+                                    ├── 选择规划策略
+                                    │   ├── 骨干优先策略
+                                    │   │   ├── 查找接入点
+                                    │   │   ├── 三段式规划
+                                    │   │   └── 路径合并
+                                    │   └── 直接规划策略
+                                    ├── 路径验证
+                                    ├── 质量评估
+                                    ├── 后处理优化
+                                    └── 缓存结果
+```
+
+### 3. 实时仿真流程
+```
+仿真循环 (simulation_step)
+├── 更新车辆调度器
+│   ├── 处理当前任务
+│   ├── 检查任务完成
+│   └── 分配新任务
+├── 更新车辆位置和状态
+├── 检查路径冲突 (ECBS)
+├── 更新交通流量
+└── 刷新GUI显示
+```
+
+## 关键技术特点
+
+### 1. 骨干网络设计
+- **分层路径结构**: Primary/Secondary/Auxiliary
+- **智能连接点**: 基于质量评估自动生成
+- **高效空间索引**: KDTree + 网格索引混合
+- **动态优化**: 实时监控和自适应调整
+
+### 2. 多策略路径规划
+- **骨干优先**: 充分利用预构建的高质量路径
+- **三段式规划**: 接入段+骨干段+离开段
+- **智能缓存**: LRU缓存 + 质量门槛过滤
+- **质量评估**: 多维度综合评分
+
+### 3. 用户交互设计
+- **实时可视化**: 车辆状态、路径结构、骨干网络
+- **任务控制**: 特定点位选择、批量ECBS分配
+- **性能监控**: 实时统计、缓存命中率、算法效率
+- **调试支持**: 详细日志、状态跟踪
+
+这个系统的核心创新在于**骨干路径网络**的设计思想，通过预构建高质量的主干路径，大大提高了多车辆环境下的路径规划效率和质量。

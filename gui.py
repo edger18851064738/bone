@@ -288,6 +288,11 @@ class EnhancedVehicleGraphicsItem(QGraphicsItemGroup):
         status = self.vehicle_data.get('status', 'idle')
         color = VEHICLE_COLORS.get(status, VEHICLE_COLORS['idle'])
         
+        # 调试：确保颜色映射正确
+        if status not in VEHICLE_COLORS:
+            print(f"警告: 未知的车辆状态 '{status}', 使用默认颜色")
+            color = VEHICLE_COLORS['idle']
+        
         # 车辆主体
         self.vehicle_body.setBrush(QBrush(color))
         self.vehicle_body.setPen(QPen(Qt.black, 0.5))
@@ -371,6 +376,9 @@ class EnhancedVehicleGraphicsItem(QGraphicsItemGroup):
         """更新车辆数据"""
         self.vehicle_data = vehicle_data
         self.position = vehicle_data['position']
+        
+        # 调试输出 - 可以在需要时启用
+        # print(f"车辆 {self.vehicle_id} 状态更新: {vehicle_data.get('status', 'unknown')}")
         
         # 更新外观
         self._update_vehicle_appearance()
@@ -936,32 +944,55 @@ class MineGraphicsScene(QGraphicsScene):
         if not self.env:
             return
             
-        for vehicle_id, vehicle_data in self.env.vehicles.items():
-            if vehicle_id in self.vehicle_items:
-                self.vehicle_items[vehicle_id].update_data(vehicle_data)
-            else:
-                vehicle_item = EnhancedVehicleGraphicsItem(vehicle_id, vehicle_data)
-                self.addItem(vehicle_item)
-                self.vehicle_items[vehicle_id] = vehicle_item
-            
-            # 更新路径
-            if (self.show_trajectories and 'path' in vehicle_data and 
-                vehicle_data['path']):
+        try:
+            for vehicle_id, vehicle_data in self.env.vehicles.items():
+                if vehicle_id in self.vehicle_items:
+                    # 更新现有车辆
+                    self.vehicle_items[vehicle_id].update_data(vehicle_data)
+                else:
+                    # 添加新车辆
+                    vehicle_item = EnhancedVehicleGraphicsItem(vehicle_id, vehicle_data)
+                    self.addItem(vehicle_item)
+                    self.vehicle_items[vehicle_id] = vehicle_item
                 
+                # 更新路径 - 修复路径更新逻辑
+                if (self.show_trajectories and 'path' in vehicle_data and 
+                    vehicle_data['path']):
+                    
+                    # 移除旧路径
+                    if vehicle_id in self.path_items:
+                        self.removeItem(self.path_items[vehicle_id])
+                    
+                    # 添加新路径
+                    path_structure = vehicle_data.get('path_structure')
+                    path_item = EnhancedPathGraphicsItem(
+                        vehicle_data['path'],
+                        vehicle_id=vehicle_id,
+                        path_structure=path_structure
+                    )
+                    self.addItem(path_item)
+                    self.path_items[vehicle_id] = path_item
+                elif vehicle_id in self.path_items and not self.show_trajectories:
+                    # 隐藏路径
+                    self.removeItem(self.path_items[vehicle_id])
+                    del self.path_items[vehicle_id]
+            
+            # 移除已删除的车辆
+            vehicle_ids_to_remove = []
+            for vehicle_id in self.vehicle_items:
+                if vehicle_id not in self.env.vehicles:
+                    vehicle_ids_to_remove.append(vehicle_id)
+            
+            for vehicle_id in vehicle_ids_to_remove:
+                if vehicle_id in self.vehicle_items:
+                    self.removeItem(self.vehicle_items[vehicle_id])
+                    del self.vehicle_items[vehicle_id]
                 if vehicle_id in self.path_items:
                     self.removeItem(self.path_items[vehicle_id])
-                
-                path_structure = vehicle_data.get('path_structure')
-                path_item = EnhancedPathGraphicsItem(
-                    vehicle_data['path'],
-                    vehicle_id=vehicle_id,
-                    path_structure=path_structure
-                )
-                self.addItem(path_item)
-                self.path_items[vehicle_id] = path_item
-            elif vehicle_id in self.path_items and not self.show_trajectories:
-                self.removeItem(self.path_items[vehicle_id])
-                del self.path_items[vehicle_id]
+                    del self.path_items[vehicle_id]
+        
+        except Exception as e:
+            print(f"车辆更新错误: {e}")
     
     def set_backbone_network(self, backbone_network):
         """设置骨干网络"""
@@ -2213,7 +2244,7 @@ class PerformanceMonitorPanel(QWidget):
 
 
 class OptimizedMineGUI(QMainWindow):
-    """优化后的露天矿多车协同调度系统GUI - 完整版"""
+    """优化后的露天矿多车协同调度系统GUI - 完整版（修复装载点选择问题）"""
     
     def __init__(self):
         super().__init__()
@@ -2494,7 +2525,7 @@ class OptimizedMineGUI(QMainWindow):
         self.path_layout.addStretch()
     
     def create_vehicle_tab(self):
-        """创建车辆选项卡"""
+        """创建车辆选项卡 - 修复版"""
         self.vehicle_tab = QWidget()
         self.vehicle_layout = QVBoxLayout(self.vehicle_tab)
         self.tab_widget.addTab(self.vehicle_tab, "车辆")
@@ -2503,9 +2534,27 @@ class OptimizedMineGUI(QMainWindow):
         self.vehicle_info_panel = EnhancedVehicleInfoPanel()
         self.vehicle_layout.addWidget(self.vehicle_info_panel)
         
-        # 车辆控制组
+        # 车辆控制组 - 修复版：添加装载点和卸载点选择
         control_group = QGroupBox("车辆控制")
         control_layout = QVBoxLayout()
+        
+        # ✅ 新增: 装载点选择
+        loading_selection_layout = QHBoxLayout()
+        loading_selection_layout.addWidget(QLabel("选择装载点:"))
+        self.vehicle_loading_combo = QComboBox()
+        self.vehicle_loading_combo.setMinimumHeight(25)
+        self.vehicle_loading_combo.setToolTip("选择车辆要前往的装载点")
+        loading_selection_layout.addWidget(self.vehicle_loading_combo)
+        control_layout.addLayout(loading_selection_layout)
+        
+        # ✅ 新增: 卸载点选择  
+        unloading_selection_layout = QHBoxLayout()
+        unloading_selection_layout.addWidget(QLabel("选择卸载点:"))
+        self.vehicle_unloading_combo = QComboBox()
+        self.vehicle_unloading_combo.setMinimumHeight(25)
+        self.vehicle_unloading_combo.setToolTip("选择车辆要前往的卸载点")
+        unloading_selection_layout.addWidget(self.vehicle_unloading_combo)
+        control_layout.addLayout(unloading_selection_layout)
         
         # 任务控制
         task_layout = QHBoxLayout()
@@ -2520,15 +2569,17 @@ class OptimizedMineGUI(QMainWindow):
         
         control_layout.addLayout(task_layout)
         
-        # 位置控制
+        # ✅ 修改后的位置控制按钮
         position_layout = QHBoxLayout()
         
-        self.goto_loading_button = QPushButton("前往装载点")
-        self.goto_loading_button.clicked.connect(self.goto_loading_point)
+        self.goto_loading_button = QPushButton("前往选定装载点")
+        self.goto_loading_button.clicked.connect(self.goto_selected_loading_point)
+        self.goto_loading_button.setToolTip("将车辆派往当前选中的装载点")
         position_layout.addWidget(self.goto_loading_button)
         
-        self.goto_unloading_button = QPushButton("前往卸载点")
-        self.goto_unloading_button.clicked.connect(self.goto_unloading_point)
+        self.goto_unloading_button = QPushButton("前往选定卸载点")
+        self.goto_unloading_button.clicked.connect(self.goto_selected_unloading_point)
+        self.goto_unloading_button.setToolTip("将车辆派往当前选中的卸载点")
         position_layout.addWidget(self.goto_unloading_button)
         
         control_layout.addLayout(position_layout)
@@ -2948,9 +2999,26 @@ class OptimizedMineGUI(QMainWindow):
         self.env_info_values["车辆数:"].setText(str(len(self.env.vehicles)))
     
     def update_vehicle_combo(self):
-        """更新车辆下拉框"""
+        """更新车辆下拉框 - 修复版"""
         self.vehicle_info_panel.set_environment(self.env, self.vehicle_scheduler)
         self.task_control_panel.set_environment(self.env, self.vehicle_scheduler, self)
+        
+        # ✅ 新增: 更新车辆选项卡中的装载点和卸载点选择框
+        if hasattr(self, 'vehicle_loading_combo'):
+            self.vehicle_loading_combo.clear()
+            if self.env and self.env.loading_points:
+                for i, point in enumerate(self.env.loading_points):
+                    self.vehicle_loading_combo.addItem(
+                        f"装载点 {i+1} ({point[0]:.1f}, {point[1]:.1f})", i
+                    )
+        
+        if hasattr(self, 'vehicle_unloading_combo'):
+            self.vehicle_unloading_combo.clear()
+            if self.env and self.env.unloading_points:
+                for i, point in enumerate(self.env.unloading_points):
+                    self.vehicle_unloading_combo.addItem(
+                        f"卸载点 {i+1} ({point[0]:.1f}, {point[1]:.1f})", i
+                    )
     
     def update_path_info(self):
         """更新路径信息"""
@@ -3068,7 +3136,18 @@ class OptimizedMineGUI(QMainWindow):
         
         # 更新车辆调度器
         if self.vehicle_scheduler:
-            self.vehicle_scheduler.update(time_step)
+            try:
+                self.vehicle_scheduler.update(time_step)
+                
+                # 确保车辆状态同步 - 添加调试信息
+                if hasattr(self, 'debug') and self.debug:
+                    for vehicle_id, vehicle in self.env.vehicles.items():
+                        scheduler_status = self.vehicle_scheduler.vehicle_statuses.get(vehicle_id, {})
+                        print(f"车辆 {vehicle_id}: 环境状态={vehicle.get('status', 'unknown')}, "
+                            f"调度器状态={scheduler_status.get('status', 'unknown')}")
+            
+            except Exception as e:
+                self.log(f"车辆调度器更新错误: {e}", "error")
         
         # 更新进度条
         max_time = 3600  # 1小时
@@ -3085,25 +3164,42 @@ class OptimizedMineGUI(QMainWindow):
         if not self.env:
             return
         
-        # 更新车辆位置
-        self.graphics_view.update_vehicles()
+        try:
+            # 更新车辆位置和状态
+            self.graphics_view.update_vehicles()
+            
+            # 更新车辆信息面板
+            current_index = self.vehicle_info_panel.vehicle_combo.currentIndex()
+            if current_index >= 0:
+                self.vehicle_info_panel.update_vehicle_info(current_index)
+            
+            # 更新任务列表
+            self.update_task_list()
+            
+            # 更新交通流
+            if hasattr(self.graphics_view, 'mine_scene'):
+                self.graphics_view.mine_scene.update_traffic_flow()
+            
+            # 显示系统状态 - 增强调试信息
+            if self.vehicle_scheduler and hasattr(self.vehicle_scheduler, 'conflict_counts'):
+                total_conflicts = sum(self.vehicle_scheduler.conflict_counts.values())
+                
+                # 统计车辆状态
+                status_counts = {'idle': 0, 'moving': 0, 'loading': 0, 'unloading': 0}
+                for vehicle in self.env.vehicles.values():
+                    status = vehicle.get('status', 'idle')
+                    status_counts[status] = status_counts.get(status, 0) + 1
+                
+                status_text = f"车辆状态: 空闲{status_counts['idle']}, 移动{status_counts['moving']}, " \
+                            f"装载{status_counts['loading']}, 卸载{status_counts['unloading']}"
+                
+                if total_conflicts > 0:
+                    status_text += f" | ECBS已解决 {total_conflicts} 个路径冲突"
+                
+                self.statusBar().showMessage(status_text)
         
-        # 更新车辆信息面板
-        current_index = self.vehicle_info_panel.vehicle_combo.currentIndex()
-        if current_index >= 0:
-            self.vehicle_info_panel.update_vehicle_info(current_index)
-        
-        # 更新任务列表
-        self.update_task_list()
-        
-        # 更新交通流
-        self.graphics_view.mine_scene.update_traffic_flow()
-        
-        # 显示系统状态
-        if self.vehicle_scheduler and hasattr(self.vehicle_scheduler, 'conflict_counts'):
-            total_conflicts = sum(self.vehicle_scheduler.conflict_counts.values())
-            if total_conflicts > 0:
-                self.statusBar().showMessage(f"ECBS已解决 {total_conflicts} 个路径冲突")
+        except Exception as e:
+            self.log(f"显示更新错误: {e}", "error")
     
     def update_task_list(self):
         """更新任务列表"""
@@ -3168,7 +3264,143 @@ class OptimizedMineGUI(QMainWindow):
         self.task_info_values["质量评分:"].setText(f"{task.quality_score:.2f}" if hasattr(task, 'quality_score') else "--")
         self.task_info_values["骨干利用率:"].setText(f"{task.backbone_utilization:.1%}" if hasattr(task, 'backbone_utilization') else "--")
     
-    # 车辆操作方法
+    # ✅ 修复后的车辆操作方法
+    def goto_selected_loading_point(self):
+        """前往选定的装载点 - 修复版"""
+        if not self.vehicle_scheduler or not self.env.loading_points:
+            self.log("没有可用的装载点", "warning")
+            return
+        
+        # 获取选中的车辆
+        vehicle_id = self.vehicle_info_panel.vehicle_combo.itemData(
+            self.vehicle_info_panel.vehicle_combo.currentIndex()
+        )
+        if vehicle_id is None:
+            self.log("请先选择一个车辆", "warning")
+            return
+        
+        # 获取选中的装载点ID - 修复关键点！
+        if not hasattr(self, 'vehicle_loading_combo'):
+            self.log("装载点选择器未初始化", "error")
+            return
+            
+        loading_point_id = self.vehicle_loading_combo.currentData()
+        if loading_point_id is None:
+            self.log("请选择一个装载点", "warning")
+            return
+        
+        # 验证装载点ID的有效性
+        if loading_point_id < 0 or loading_point_id >= len(self.env.loading_points):
+            self.log(f"无效的装载点ID: {loading_point_id}", "error")
+            return
+        
+        loading_point = self.env.loading_points[loading_point_id]
+        task_id = f"task_{self.vehicle_scheduler.task_counter}"
+        self.vehicle_scheduler.task_counter += 1
+        
+        vehicle_position = self.env.vehicles[vehicle_id]['position']
+        
+        # 创建任务时正确设置loading_point_id - 修复关键点！
+        task = VehicleTask(
+            task_id,
+            'to_loading',
+            vehicle_position,
+            (loading_point[0], loading_point[1], 0),
+            2,  # 装载任务优先级较高
+            loading_point_id=loading_point_id,  # ✅ 关键修复
+            unloading_point_id=None
+        )
+        
+        self.vehicle_scheduler.tasks[task_id] = task
+        self.vehicle_scheduler.task_queues[vehicle_id] = [task_id]
+        
+        # 更新车辆状态中的任务队列信息
+        self.vehicle_scheduler.vehicle_statuses[vehicle_id]['task_queue'].append({
+            'task_id': task_id,
+            'task_type': task.task_type,
+            'start': task.start,
+            'goal': task.goal,
+            'priority': task.priority,
+            'loading_point_id': loading_point_id  # 添加装载点信息
+        })
+        
+        status = self.vehicle_scheduler.vehicle_statuses[vehicle_id]
+        if status['status'] == 'idle':
+            self.vehicle_scheduler._start_next_task(vehicle_id)
+        
+        self.log(f"已命令车辆 {vehicle_id} 前往装载点 {loading_point_id + 1}", "success")
+        
+        # ✅ 可选: 添加调试信息
+        if hasattr(self, 'debug_enabled') and self.debug_enabled:
+            self.debug_task_assignment(vehicle_id, task)
+    
+    def goto_selected_unloading_point(self):
+        """前往选定的卸载点 - 修复版"""
+        if not self.vehicle_scheduler or not self.env.unloading_points:
+            self.log("没有可用的卸载点", "warning")
+            return
+        
+        vehicle_id = self.vehicle_info_panel.vehicle_combo.itemData(
+            self.vehicle_info_panel.vehicle_combo.currentIndex()
+        )
+        if vehicle_id is None:
+            self.log("请先选择一个车辆", "warning")
+            return
+        
+        # 获取选中的卸载点ID - 修复关键点！
+        if not hasattr(self, 'vehicle_unloading_combo'):
+            self.log("卸载点选择器未初始化", "error")
+            return
+            
+        unloading_point_id = self.vehicle_unloading_combo.currentData()
+        if unloading_point_id is None:
+            self.log("请选择一个卸载点", "warning")
+            return
+        
+        if unloading_point_id < 0 or unloading_point_id >= len(self.env.unloading_points):
+            self.log(f"无效的卸载点ID: {unloading_point_id}", "error")
+            return
+        
+        unloading_point = self.env.unloading_points[unloading_point_id]
+        task_id = f"task_{self.vehicle_scheduler.task_counter}"
+        self.vehicle_scheduler.task_counter += 1
+        
+        vehicle_position = self.env.vehicles[vehicle_id]['position']
+        
+        # 创建任务时正确设置unloading_point_id - 修复关键点！
+        task = VehicleTask(
+            task_id,
+            'to_unloading',
+            vehicle_position,
+            (unloading_point[0], unloading_point[1], 0),
+            3,  # 卸载任务优先级最高
+            loading_point_id=None,
+            unloading_point_id=unloading_point_id  # ✅ 关键修复
+        )
+        
+        self.vehicle_scheduler.tasks[task_id] = task
+        self.vehicle_scheduler.task_queues[vehicle_id] = [task_id]
+        
+        # 更新车辆状态中的任务队列信息
+        self.vehicle_scheduler.vehicle_statuses[vehicle_id]['task_queue'].append({
+            'task_id': task_id,
+            'task_type': task.task_type,
+            'start': task.start,
+            'goal': task.goal,
+            'priority': task.priority,
+            'unloading_point_id': unloading_point_id  # 添加卸载点信息
+        })
+        
+        status = self.vehicle_scheduler.vehicle_statuses[vehicle_id]
+        if status['status'] == 'idle':
+            self.vehicle_scheduler._start_next_task(vehicle_id)
+        
+        self.log(f"已命令车辆 {vehicle_id} 前往卸载点 {unloading_point_id + 1}", "success")
+        
+        # ✅ 可选: 添加调试信息
+        if hasattr(self, 'debug_enabled') and self.debug_enabled:
+            self.debug_task_assignment(vehicle_id, task)
+    
     def assign_vehicle_task(self):
         """分配任务给当前车辆"""
         if not self.vehicle_scheduler:
@@ -3225,76 +3457,6 @@ class OptimizedMineGUI(QMainWindow):
                 self.log(f"已取消车辆 {vehicle_id} 的所有任务", "success")
             else:
                 self.log(f"车辆 {vehicle_id} 没有活动任务", "warning")
-    
-    def goto_loading_point(self):
-        """前往装载点"""
-        if not self.vehicle_scheduler or not self.env.loading_points:
-            return
-        
-        vehicle_id = self.vehicle_info_panel.vehicle_combo.itemData(
-            self.vehicle_info_panel.vehicle_combo.currentIndex()
-        )
-        if vehicle_id is None:
-            self.log("请先选择一个车辆", "warning")
-            return
-        
-        loading_point = self.env.loading_points[0]
-        task_id = f"task_{self.vehicle_scheduler.task_counter}"
-        self.vehicle_scheduler.task_counter += 1
-        
-        vehicle_position = self.env.vehicles[vehicle_id]['position']
-        
-        task = VehicleTask(
-            task_id,
-            'to_loading',
-            vehicle_position,
-            (loading_point[0], loading_point[1], 0),
-            1
-        )
-        
-        self.vehicle_scheduler.tasks[task_id] = task
-        self.vehicle_scheduler.task_queues[vehicle_id] = [task_id]
-        
-        status = self.vehicle_scheduler.vehicle_statuses[vehicle_id]
-        if status['status'] == 'idle':
-            self.vehicle_scheduler._start_next_task(vehicle_id)
-        
-        self.log(f"已命令车辆 {vehicle_id} 前往装载点", "success")
-    
-    def goto_unloading_point(self):
-        """前往卸载点"""
-        if not self.vehicle_scheduler or not self.env.unloading_points:
-            return
-        
-        vehicle_id = self.vehicle_info_panel.vehicle_combo.itemData(
-            self.vehicle_info_panel.vehicle_combo.currentIndex()
-        )
-        if vehicle_id is None:
-            self.log("请先选择一个车辆", "warning")
-            return
-        
-        unloading_point = self.env.unloading_points[0]
-        task_id = f"task_{self.vehicle_scheduler.task_counter}"
-        self.vehicle_scheduler.task_counter += 1
-        
-        vehicle_position = self.env.vehicles[vehicle_id]['position']
-        
-        task = VehicleTask(
-            task_id,
-            'to_unloading',
-            vehicle_position,
-            (unloading_point[0], unloading_point[1], 0),
-            1
-        )
-        
-        self.vehicle_scheduler.tasks[task_id] = task
-        self.vehicle_scheduler.task_queues[vehicle_id] = [task_id]
-        
-        status = self.vehicle_scheduler.vehicle_statuses[vehicle_id]
-        if status['status'] == 'idle':
-            self.vehicle_scheduler._start_next_task(vehicle_id)
-        
-        self.log(f"已命令车辆 {vehicle_id} 前往卸载点", "success")
     
     def return_to_start(self):
         """返回起点"""
@@ -3523,6 +3685,18 @@ class OptimizedMineGUI(QMainWindow):
         
         QMessageBox.about(self, "关于", about_text)
     
+    # ✅ 新增: 调试方法
+    def debug_task_assignment(self, vehicle_id, task):
+        """调试任务分配"""
+        print(f"=== 任务分配调试信息 ===")
+        print(f"车辆ID: {vehicle_id}")
+        print(f"任务ID: {task.task_id}")
+        print(f"任务类型: {task.task_type}")
+        print(f"装载点ID: {task.loading_point_id}")
+        print(f"卸载点ID: {task.unloading_point_id}")
+        print(f"目标位置: {task.goal}")
+        print(f"========================")
+    
     def log(self, message, level="info"):
         """添加日志消息"""
         current_time = time.strftime("%H:%M:%S")
@@ -3552,6 +3726,7 @@ class OptimizedMineGUI(QMainWindow):
 
 # 保持向后兼容性
 MineGUI = OptimizedMineGUI
+
 
 
 def main():
