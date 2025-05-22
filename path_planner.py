@@ -4,11 +4,20 @@ import time
 from collections import defaultdict, OrderedDict
 from RRT import RRTPlanner
 
-class OptimizedPathPlanner:
-    """优化后的路径规划器，支持智能缓存、结构化路径规划和多策略路径选择"""
+class SimplifiedPathPlanner:
+    """
+    简化的路径规划器 - 按照用户设计理念重新实现
+    
+    设计理念：
+    1. 优先检索骨干路径中有无前往该终点的路径
+    2. 如果有，选择离起点最近的骨干路径
+    3. 规划从起点到骨干路径起点的接入路径
+    4. 拼接：接入路径 + 骨干路径 = 完整路径
+    5. 如果没有骨干路径，直接点对点规划
+    """
     
     def __init__(self, env, backbone_network=None, rrt_planner=None, traffic_manager=None):
-        """初始化路径规划器"""
+        """初始化简化的路径规划器"""
         self.env = env
         self.backbone_network = backbone_network
         self.traffic_manager = traffic_manager
@@ -30,83 +39,67 @@ class OptimizedPathPlanner:
         else:
             self.rrt_planner = rrt_planner
         
-        # 智能缓存系统
+        # 智能缓存系统 - 保留原有的缓存机制
         self.cache_config = {
-            'max_size': 1000,
+            'max_size': 500,
             'ttl': 300,  # 5分钟过期
-            'lru_enabled': True,
-            'quality_threshold': 0.6  # 只缓存高质量路径
+            'quality_threshold': 0.6
         }
         self.route_cache = OrderedDict()  # LRU缓存
-        self.cache_metadata = {}  # 缓存元数据 {key: {'timestamp', 'quality', 'hit_count'}}
+        self.cache_metadata = {}
         
-        # 路径验证增强
-        self.validation_config = {
-            'enabled': True,
-            'sample_density': 20,  # 每段采样点数
-            'safety_margin': 1.5,  # 安全边距
-            'multi_pass': True,    # 多次验证
-            'dynamic_density': True  # 动态调整采样密度
-        }
-        
-        # 路径质量评估
+        # 路径质量评估器
         self.quality_assessor = PathQualityAssessor(env)
-        
-        # 多策略路径规划
-        self.planning_strategies = {
-            'backbone_first': self._plan_backbone_first_strategy,
-            'direct_optimized': self._plan_direct_optimized_strategy,
-            'hybrid_multi_path': self._plan_hybrid_multi_path_strategy,
-            'emergency_fallback': self._plan_emergency_fallback_strategy
-        }
-        self.default_strategy = 'backbone_first'
         
         # 性能统计
         self.performance_stats = {
             'total_requests': 0,
             'cache_hits': 0,
             'cache_misses': 0,
-            'backbone_successes': 0,
-            'direct_fallbacks': 0,
+            'backbone_usage': 0,
+            'direct_planning': 0,
             'planning_times': [],
             'quality_scores': [],
-            'strategy_usage': defaultdict(int)
+            'backbone_success_rate': 0.0
         }
         
-        # 路径优化参数
-        self.optimization_config = {
-            'post_smoothing': True,
-            'shortcut_optimization': True,
-            'quality_improvement': True,
-            'max_optimization_time': 2.0
+        # 规划配置
+        self.planning_config = {
+            'max_attempts': 3,
+            'enable_post_smoothing': True,
+            'enable_shortcut_optimization': True,
+            'enable_quality_check': True
         }
         
         # 调试选项
         self.debug = False
         self.verbose_logging = False
+        
+        print("初始化简化的路径规划器")
     
     def set_backbone_network(self, backbone_network):
-        """设置主干路径网络"""
+        """设置骨干路径网络"""
         self.backbone_network = backbone_network
-        # 清空缓存，因为骨干网络发生变化
+        # 清空缓存
         self._clear_cache()
-        
+        print("已设置骨干路径网络")
+    
     def set_traffic_manager(self, traffic_manager):
         """设置交通管理器"""
         self.traffic_manager = traffic_manager
     
     def plan_path(self, vehicle_id, start, goal, use_backbone=True, check_conflicts=True, 
-                  strategy=None, max_attempts=3):
+                  strategy=None, max_attempts=None):
         """
-        规划从起点到终点的完整路径 - 增强版
+        主要路径规划接口 - 简化版
         
         Args:
             vehicle_id: 车辆ID
             start: 起点坐标 (x, y, theta)
             goal: 终点坐标 (x, y, theta)
-            use_backbone: 是否使用主干网络
-            check_conflicts: 是否检查路径冲突
-            strategy: 规划策略（可选）
+            use_backbone: 是否使用骨干网络（简化后总是尝试使用）
+            check_conflicts: 是否检查冲突
+            strategy: 兼容参数，不再使用
             max_attempts: 最大尝试次数
             
         Returns:
@@ -124,38 +117,31 @@ class OptimizedPathPlanner:
             return [start], {'type': 'direct', 'segments': 1}
         
         # 生成缓存键
-        cache_key = self._generate_cache_key(vehicle_id, start, goal, use_backbone)
+        cache_key = self._generate_cache_key(vehicle_id, start, goal)
         
         # 检查缓存
         cached_result = self._check_cache(cache_key)
         if cached_result:
             self.performance_stats['cache_hits'] += 1
-            planning_time = time.time() - start_time
-            self.performance_stats['planning_times'].append(planning_time)
             return cached_result
         
         self.performance_stats['cache_misses'] += 1
         
-        # 选择规划策略
-        strategy = strategy or self.default_strategy
-        self.performance_stats['strategy_usage'][strategy] += 1
-        
         # 多次尝试规划
+        max_attempts = max_attempts or self.planning_config['max_attempts']
         best_path = None
         best_structure = None
         best_quality = 0
         
         for attempt in range(max_attempts):
             try:
-                # 使用选定的策略规划
-                path, structure = self.planning_strategies[strategy](
-                    vehicle_id, start, goal, use_backbone, attempt
-                )
+                # 核心规划逻辑
+                path, structure = self._plan_path_core(vehicle_id, start, goal, attempt)
                 
                 if path:
                     # 验证路径
-                    if self._validate_path_comprehensive(path):
-                        # 评估路径质量
+                    if self._validate_path(path):
+                        # 评估质量
                         quality = self.quality_assessor.evaluate_path(path)
                         
                         if quality > best_quality:
@@ -163,567 +149,172 @@ class OptimizedPathPlanner:
                             best_structure = structure
                             best_quality = quality
                             
-                            # 如果质量足够高，提前结束
+                            # 质量足够高，提前结束
                             if quality >= 0.9:
                                 break
-                
+            
             except Exception as e:
                 if self.debug:
                     print(f"规划尝试 {attempt + 1} 失败: {e}")
                 continue
         
         # 后处理优化
-        if best_path and self.optimization_config['post_smoothing']:
+        if best_path:
             best_path = self._post_process_path(best_path)
-            best_quality = self.quality_assessor.evaluate_path(best_path)
+            if best_structure:
+                best_structure['final_quality'] = self.quality_assessor.evaluate_path(best_path)
         
         # 冲突检查
         if best_path and check_conflicts and self.traffic_manager:
             if self.traffic_manager.check_path_conflicts(vehicle_id, best_path):
-                # 尝试获取调整后的路径
-                adjusted_path = self.traffic_manager.suggest_path_adjustment(
-                    vehicle_id, start, goal
-                )
+                # 尝试调整路径
+                adjusted_path = self._resolve_path_conflicts(vehicle_id, start, goal, best_path)
                 if adjusted_path:
                     best_path = adjusted_path
                     best_structure = self._analyze_path_structure(best_path)
         
-        # 缓存结果
+        # 缓存高质量结果
         if best_path and best_quality >= self.cache_config['quality_threshold']:
             self._add_to_cache(cache_key, (best_path, best_structure), best_quality)
         
         # 更新统计信息
         planning_time = time.time() - start_time
         self.performance_stats['planning_times'].append(planning_time)
-        
         if best_quality > 0:
             self.performance_stats['quality_scores'].append(best_quality)
         
         if self.verbose_logging:
-            print(f"路径规划完成: 车辆{vehicle_id}, 质量={best_quality:.2f}, "
-                  f"耗时={planning_time:.3f}s, 策略={strategy}")
+            print(f"路径规划完成: 车辆{vehicle_id}, 质量={best_quality:.2f}, 耗时={planning_time:.3f}s")
         
         return best_path, best_structure
     
-    def _plan_backbone_first_strategy(self, vehicle_id, start, goal, use_backbone, attempt):
-        """骨干网络优先策略"""
-        if not use_backbone or not self.backbone_network:
-            return self._plan_direct_optimized_strategy(vehicle_id, start, goal, False, attempt)
-        
-        # 寻找骨干网络接入点
-        start_candidates = self.backbone_network.find_accessible_points(
-            start, self.rrt_planner, max_candidates=3 + attempt
-        )
-        
-        goal_candidates = self.backbone_network.find_accessible_points(
-            goal, self.rrt_planner, max_candidates=3 + attempt
-        )
-        
-        if not start_candidates or not goal_candidates:
-            if self.debug:
-                print(f"无法找到骨干网络接入点，回退到直接规划")
-            return self._plan_direct_optimized_strategy(vehicle_id, start, goal, False, attempt)
-        
-        # 尝试所有候选组合
-        best_path = None
-        best_structure = None
-        best_total_cost = float('inf')
-        
-        max_combinations = min(6, len(start_candidates) * len(goal_candidates))
-        combinations_tested = 0
-        
-        for start_point in start_candidates:
-            for goal_point in goal_candidates:
-                if combinations_tested >= max_combinations:
-                    break
-                
-                combinations_tested += 1
-                
-                # 规划三段路径
-                result = self._plan_three_segment_path(
-                    start, goal, start_point, goal_point
-                )
-                
-                if result:
-                    path, structure, total_cost = result
-                    
-                    if total_cost < best_total_cost:
-                        best_total_cost = total_cost
-                        best_path = path
-                        best_structure = structure
-            
-            if combinations_tested >= max_combinations:
-                break
-        
-        if best_path:
-            self.performance_stats['backbone_successes'] += 1
-            return best_path, best_structure
-        else:
-            self.performance_stats['direct_fallbacks'] += 1
-            return self._plan_direct_optimized_strategy(vehicle_id, start, goal, False, attempt)
+    def plan_path_with_backbone(self, vehicle_id, start, goal):
+        """
+        使用骨干网络规划路径的专用接口
+        按照用户设计理念实现
+        """
+        return self._plan_path_core(vehicle_id, start, goal, 0)
     
-    def _plan_three_segment_path(self, start, goal, start_point, goal_point):
-        """规划三段式路径：起点->骨干->骨干内->骨干->终点 - 修复版"""
-        try:
-            # 添加更严格的输入验证
-            if not start_point or not goal_point:
-                if self.debug:
-                    print("❌ 接入点信息缺失")
-                return None
-            
-            # 检查接入点是否为字典类型
-            if not isinstance(start_point, dict) or not isinstance(goal_point, dict):
-                if self.debug:
-                    print(f"❌ 接入点类型错误: start_point类型={type(start_point)}, goal_point类型={type(goal_point)}")
-                return None
-            
-            if 'position' not in start_point or 'position' not in goal_point:
-                if self.debug:
-                    print("❌ 接入点位置信息缺失")
-                    print(f"  start_point keys: {list(start_point.keys()) if start_point else 'None'}")
-                    print(f"  goal_point keys: {list(goal_point.keys()) if goal_point else 'None'}")
-                return None
-            
-            # 验证位置信息的有效性
-            start_pos = start_point.get('position')
-            goal_pos = goal_point.get('position')
-            
-            if not start_pos or not goal_pos:
-                if self.debug:
-                    print("❌ 接入点位置为空")
-                return None
-            
-            if len(start_pos) < 2 or len(goal_pos) < 2:
-                if self.debug:
-                    print("❌ 接入点位置坐标不完整")
-                return None
-            
-            if self.debug:
-                print(f"🛤️ 规划三段路径:")
-                print(f"  起点: {start}")
-                print(f"  入口: {start_pos}")
-                print(f"  出口: {goal_pos}")
-                print(f"  终点: {goal}")
-            
-            # 第一段：起点到骨干入口
-            if self.debug:
-                print("  🔸 规划第一段...")
-            segment1 = self._plan_local_segment(start, start_pos)
-            if not segment1:
-                if self.debug:
-                    print("  ❌ 第一段规划失败")
-                return None
-            
-            # 第二段：骨干网络内路径
-            if self.debug:
-                print("  🔸 规划第二段...")
-            segment2 = self._plan_backbone_segment(start_point, goal_point)
-            if not segment2:
-                if self.debug:
-                    print("  ❌ 第二段规划失败")
-                return None
-            
-            # 第三段：骨干出口到终点
-            if self.debug:
-                print("  🔸 规划第三段...")
-            segment3 = self._plan_local_segment(goal_pos, goal)
-            if not segment3:
-                if self.debug:
-                    print("  ❌ 第三段规划失败")
-                return None
-            
-            # 合并路径
-            if self.debug:
-                print("  🔗 合并路径段...")
-            complete_path = self._merge_path_segments([segment1, segment2, segment3])
-            
-            if not complete_path:
-                if self.debug:
-                    print("  ❌ 路径合并失败")
-                return None
-            
-            # 计算总成本
-            total_cost = self._calculate_path_cost(complete_path)
-            
-            # 构建结构信息 - 添加安全检查和默认值
-            structure = {
-                'type': 'three_segment',
-                'entry_point': start_point,
-                'exit_point': goal_point,
-                'backbone_segment': self._safe_get_backbone_segment_id(start_point, goal_point),
-                'to_backbone_path': segment1,
-                'backbone_path': segment2,
-                'from_backbone_path': segment3,
-                'total_cost': total_cost
-            }
-            
-            if self.debug:
-                print(f"  ✅ 三段路径规划成功，总点数: {len(complete_path)}")
-            
-            return complete_path, structure, total_cost
-            
-        except Exception as e:
-            if self.debug:
-                print(f"❌ 三段路径规划出错: {e}")
-                import traceback
-                traceback.print_exc()
-            return None
-    def _safe_get_backbone_segment_id(self, start_point, goal_point):
-        """安全获取骨干段ID"""
-        try:
-            if not isinstance(start_point, dict) or not isinstance(goal_point, dict):
-                return "unknown:unknown"
-            
-            start_path_id = start_point.get('path_id', 'unknown')
-            goal_path_id = goal_point.get('path_id', 'unknown')
-            
-            return f"{start_path_id}:{goal_path_id}"
-        except Exception as e:
-            if self.debug:
-                print(f"获取骨干段ID时出错: {e}")
-            return "error:error"    
-    def _plan_local_segment(self, start, goal, max_iterations=2000):
-        """规划局部路径段"""
-        if not self.rrt_planner:
-            return None
+    def _plan_path_core(self, vehicle_id, start, goal, attempt):
+        """
+        核心路径规划逻辑 - 按照用户设计理念
         
-        # 如果距离很近，尝试直线连接
-        distance = self._calculate_distance(start, goal)
-        if distance < 5.0 and self._is_line_collision_free(start, goal):
-            return [start, goal]
-        
-        # 使用RRT规划
-        return self.rrt_planner.plan_path(start, goal, max_iterations=max_iterations)
-    
-    def _plan_backbone_segment(self, start_point, goal_point):
-        """在骨干网络中规划路径段 - 增强安全检查版"""
-        if not self.backbone_network:
-            if self.debug:
-                print("⚠️ 骨干网络不可用")
-            return None
-        
-        # 添加更严格的安全检查
-        if not start_point or not goal_point:
-            if self.debug:
-                print("⚠️ 起点或终点信息缺失")
-            return None
-        
-        if not isinstance(start_point, dict) or not isinstance(goal_point, dict):
-            if self.debug:
-                print(f"⚠️ 接入点类型错误: start={type(start_point)}, goal={type(goal_point)}")
-            return None
-        
-        # 安全获取路径信息
-        start_path_id = start_point.get('path_id') if start_point else None
-        start_index = start_point.get('path_index', 0) if start_point else 0
-        goal_path_id = goal_point.get('path_id') if goal_point else None
-        goal_index = goal_point.get('path_index', 0) if goal_point else 0
-        start_pos = start_point.get('position') if start_point else None
-        goal_pos = goal_point.get('position') if goal_point else None
-        
+        流程：
+        1. 识别目标点是否为特殊点
+        2. 如果是，查找骨干路径
+        3. 选择最近的骨干路径
+        4. 规划接入路径
+        5. 拼接完整路径
+        6. 如果失败，回退到直接规划
+        """
         if self.debug:
-            print(f"🔍 骨干段规划: {start_path_id}[{start_index}] -> {goal_path_id}[{goal_index}]")
+            print(f"开始规划路径: {start} -> {goal} (尝试 {attempt + 1})")
         
-        # 如果路径ID缺失或位置信息缺失，使用直接连接
-        if not start_path_id or not goal_path_id or not start_pos or not goal_pos:
-            if self.debug:
-                print("⚠️ 关键信息缺失，使用直接连接")
-            
-            if start_pos and goal_pos and len(start_pos) >= 2 and len(goal_pos) >= 2:
-                return [start_pos, goal_pos]
-            else:
+        # 1. 尝试使用骨干网络
+        if self.backbone_network:
+            backbone_result = self._try_backbone_planning(start, goal, attempt)
+            if backbone_result:
+                path, structure = backbone_result
+                self.performance_stats['backbone_usage'] += 1
                 if self.debug:
-                    print("❌ 位置信息也无效")
-                return None
-        
-        # 如果在同一条路径上
-        if start_path_id == goal_path_id:
-            if hasattr(self.backbone_network, 'get_path_segment'):
-                try:
-                    segment = self.backbone_network.get_path_segment(
-                        start_path_id, start_index, goal_index
-                    )
-                    if segment and len(segment) >= 2:
-                        if self.debug:
-                            print(f"✅ 同路径段获取成功，点数: {len(segment)}")
-                        return segment
-                except Exception as e:
-                    if self.debug:
-                        print(f"⚠️ 路径段获取失败: {e}")
-            
-            # 回退方案：直接连接
-            if self.debug:
-                print("⚠️ 路径段获取失败，使用直接连接")
-            return [start_pos, goal_pos]
-        
-        # 跨路径的处理
-        if self.debug:
-            print("📝 跨路径规划，使用简化连接")
-        
-        # 简化方案：直接连接两个点
-        return [start_pos, goal_pos]
-    
-    def _plan_direct_optimized_strategy(self, vehicle_id, start, goal, use_backbone, attempt):
-        """优化的直接规划策略"""
-        if not self.rrt_planner:
-            return None, None
-        
-        # 根据尝试次数调整参数
-        max_iterations = 3000 + attempt * 1000
-        
-        path = self.rrt_planner.plan_path(
-            start, goal, max_iterations=max_iterations
-        )
-        
-        if path:
-            structure = {
-                'type': 'direct',
-                'segments': 1,
-                'method': 'rrt',
-                'iterations': max_iterations
-            }
-            return path, structure
-        
-        return None, None
-    
-    def _plan_hybrid_multi_path_strategy(self, vehicle_id, start, goal, use_backbone, attempt):
-        """混合多路径策略"""
-        # 同时尝试多种规划方法
-        methods = [
-            ('backbone', self._plan_backbone_first_strategy),
-            ('direct', self._plan_direct_optimized_strategy)
-        ]
-        
-        best_path = None
-        best_structure = None
-        best_quality = 0
-        
-        for method_name, method_func in methods:
-            try:
-                path, structure = method_func(vehicle_id, start, goal, use_backbone, 0)
-                
-                if path:
-                    quality = self.quality_assessor.evaluate_path(path)
-                    
-                    if quality > best_quality:
-                        best_quality = quality
-                        best_path = path
-                        best_structure = structure
-                        best_structure['method'] = method_name
-                        
-            except Exception as e:
-                if self.debug:
-                    print(f"混合策略中的{method_name}方法失败: {e}")
-                continue
-        
-        return best_path, best_structure
-    
-    def _plan_emergency_fallback_strategy(self, vehicle_id, start, goal, use_backbone, attempt):
-        """紧急回退策略"""
-        # 使用最简单但可靠的方法
-        if self._is_line_collision_free(start, goal):
-            return [start, goal], {'type': 'emergency_direct', 'method': 'line'}
-        
-        # 尝试简化的A*或其他确定性算法
-        return self._plan_simple_grid_path(start, goal)
-    
-    def _plan_simple_grid_path(self, start, goal):
-        """简单的网格路径规划（A*简化版）"""
-        # 这是一个简化的实现，实际中可以使用更复杂的算法
-        try:
-            # 转换为网格坐标
-            start_grid = (int(start[0]), int(start[1]))
-            goal_grid = (int(goal[0]), int(goal[1]))
-            
-            # 简单的直线路径，但避开障碍物
-            path = []
-            current = start_grid
-            
-            while current != goal_grid:
-                # 计算下一步方向
-                dx = 1 if goal_grid[0] > current[0] else (-1 if goal_grid[0] < current[0] else 0)
-                dy = 1 if goal_grid[1] > current[1] else (-1 if goal_grid[1] < current[1] else 0)
-                
-                next_pos = (current[0] + dx, current[1] + dy)
-                
-                # 检查是否可通行
-                if self._is_valid_position(next_pos[0], next_pos[1]):
-                    current = next_pos
-                    path.append((float(current[0]), float(current[1]), 0.0))
-                else:
-                    # 尝试绕行
-                    if dx != 0 and self._is_valid_position(current[0] + dx, current[1]):
-                        current = (current[0] + dx, current[1])
-                        path.append((float(current[0]), float(current[1]), 0.0))
-                    elif dy != 0 and self._is_valid_position(current[0], current[1] + dy):
-                        current = (current[0], current[1] + dy)
-                        path.append((float(current[0]), float(current[1]), 0.0))
-                    else:
-                        # 无法继续，失败
-                        return None, None
-                
-                # 防止无限循环
-                if len(path) > 1000:
-                    break
-            
-            if path:
-                # 添加终点
-                path.append(goal)
-                
-                structure = {
-                    'type': 'emergency_grid',
-                    'method': 'simplified_astar',
-                    'segments': len(path) - 1
-                }
-                
+                    print(f"骨干网络规划成功，路径长度: {len(path)}")
                 return path, structure
-            
-        except Exception as e:
-            if self.debug:
-                print(f"简单网格路径规划失败: {e}")
+        
+        # 2. 回退到直接规划
+        if self.debug:
+            print("回退到直接规划")
+        
+        direct_result = self._direct_planning(start, goal, attempt)
+        if direct_result:
+            self.performance_stats['direct_planning'] += 1
+            return direct_result, {'type': 'direct', 'method': 'rrt'}
         
         return None, None
     
-    def _merge_path_segments(self, segments):
-        """合并多个路径段，处理重复点"""
-        if not segments or not any(segments):
-            return None
-        
-        # 过滤空段
-        valid_segments = [seg for seg in segments if seg and len(seg) > 0]
-        
-        if not valid_segments:
-            return None
-        
-        merged_path = list(valid_segments[0])
-        
-        for segment in valid_segments[1:]:
-            if not segment:
-                continue
+    def _try_backbone_planning(self, start, goal, attempt):
+        """
+        尝试使用骨干网络规划路径
+        按照用户设计理念：查找 -> 选择 -> 接入 -> 拼接
+        """
+        try:
+            # 1. 识别目标点类型
+            target_type, target_id = self.backbone_network.identify_target_point(goal)
             
-            # 检查连接点是否重复
-            if (merged_path and segment and 
-                self._is_same_position(merged_path[-1], segment[0])):
-                # 跳过重复的连接点
-                merged_path.extend(segment[1:])
-            else:
-                # 直接连接
-                merged_path.extend(segment)
-        
-        return merged_path if len(merged_path) >= 2 else None
-    
-    def _validate_path_comprehensive(self, path):
-        """综合路径验证"""
-        if not self.validation_config['enabled'] or not path or len(path) < 2:
-            return len(path) >= 2 if path else False
-        
-        # 基本碰撞检测
-        if not self._validate_path_collision(path):
-            return False
-        
-        # 运动学约束检查
-        if not self._validate_kinematic_constraints(path):
-            return False
-        
-        # 多次验证（如果启用）
-        if self.validation_config['multi_pass']:
-            # 使用不同采样密度再次验证
-            dense_valid = self._validate_path_collision(
-                path, 
-                sample_density=self.validation_config['sample_density'] * 2
+            if not target_type:
+                if self.debug:
+                    print("目标不是特殊点，无法使用骨干路径")
+                return None
+            
+            if self.debug:
+                print(f"目标识别为: {target_type}_{target_id}")
+            
+            # 2. 直接使用骨干网络的完整规划方法
+            complete_path, structure = self.backbone_network.get_path_from_position_to_target(
+                start, target_type, target_id
             )
-            if not dense_valid:
-                return False
-        
-        return True
-    
-    def _validate_path_collision(self, path, sample_density=None):
-        """碰撞检测验证"""
-        if not path or len(path) < 2:
-            return False
-        
-        sample_density = sample_density or self.validation_config['sample_density']
-        
-        for i in range(len(path) - 1):
-            if not self._validate_segment_collision(path[i], path[i+1], sample_density):
-                return False
-        
-        return True
-    
-    def _validate_segment_collision(self, p1, p2, sample_density):
-        """验证路径段是否无碰撞"""
-        distance = self._calculate_distance(p1, p2)
-        
-        # 动态调整采样密度
-        if self.validation_config['dynamic_density']:
-            sample_density = max(sample_density, int(distance * 2))
-        
-        # 沿线段采样检查
-        for i in range(sample_density + 1):
-            t = i / max(1, sample_density)
-            x = p1[0] + t * (p2[0] - p1[0])
-            y = p1[1] + t * (p2[1] - p1[1])
             
-            # 检查基本碰撞
-            if not self._is_valid_position_with_margin(int(x), int(y)):
-                return False
-        
-        return True
-    
-    def _is_valid_position_with_margin(self, x, y):
-        """带安全边距的位置检查"""
-        margin = int(self.validation_config['safety_margin'])
-        
-        # 检查周围区域
-        for dx in range(-margin, margin + 1):
-            for dy in range(-margin, margin + 1):
-                check_x, check_y = x + dx, y + dy
-                
-                if (check_x < 0 or check_x >= self.env.width or 
-                    check_y < 0 or check_y >= self.env.height):
-                    return False
-                
-                if hasattr(self.env, 'grid') and self.env.grid[check_x, check_y] == 1:
-                    return False
-        
-        return True
-    
-    def _validate_kinematic_constraints(self, path):
-        """验证运动学约束"""
-        if not path or len(path) < 3:
-            return True
-        
-        max_turning_rate = math.pi / 4  # 最大转弯率
-        
-        for i in range(1, len(path) - 1):
-            prev = path[i-1]
-            curr = path[i]
-            next_p = path[i+1]
+            if complete_path and structure:
+                if self.debug:
+                    print(f"骨干网络规划成功: 总长度{len(complete_path)}, "
+                          f"骨干利用率{structure.get('backbone_utilization', 0):.2f}")
+                return complete_path, structure
             
-            # 计算转弯角度
-            angle = self._calculate_turning_angle(prev, curr, next_p)
+            return None
             
-            # 检查转弯是否过急
-            if angle > max_turning_rate:
-                return False
-        
-        return True
+        except Exception as e:
+            if self.debug:
+                print(f"骨干网络规划失败: {e}")
+            return None
     
-    def _calculate_turning_angle(self, p1, p2, p3):
-        """计算转弯角度"""
-        v1 = np.array([p2[0] - p1[0], p2[1] - p1[1]])
-        v2 = np.array([p3[0] - p2[0], p3[1] - p2[1]])
+    def _direct_planning(self, start, goal, attempt):
+        """
+        直接点对点规划
+        """
+        if not self.rrt_planner:
+            print("RRT规划器不可用")
+            return None
         
-        len_v1 = np.linalg.norm(v1)
-        len_v2 = np.linalg.norm(v2)
+        try:
+            # 根据尝试次数调整参数
+            max_iterations = 3000 + attempt * 1000
+            
+            if self.debug:
+                print(f"直接规划: 最大迭代次数 {max_iterations}")
+            
+            path = self.rrt_planner.plan_path(start, goal, max_iterations=max_iterations)
+            
+            if path and len(path) >= 2:
+                if self.debug:
+                    print(f"直接规划成功，路径长度: {len(path)}")
+                return path
+            
+            return None
+            
+        except Exception as e:
+            if self.debug:
+                print(f"直接规划失败: {e}")
+            return None
+    
+    def _resolve_path_conflicts(self, vehicle_id, start, goal, current_path):
+        """解决路径冲突"""
+        if not self.traffic_manager:
+            return current_path
         
-        if len_v1 < 0.001 or len_v2 < 0.001:
-            return 0
-        
-        cos_angle = np.dot(v1, v2) / (len_v1 * len_v2)
-        cos_angle = np.clip(cos_angle, -1.0, 1.0)
-        
-        return math.acos(cos_angle)
+        try:
+            # 尝试获取交通管理器建议的路径调整
+            adjusted_path = self.traffic_manager.suggest_path_adjustment(vehicle_id, start, goal)
+            
+            if adjusted_path:
+                if self.debug:
+                    print(f"交通管理器建议路径调整，新路径长度: {len(adjusted_path)}")
+                return adjusted_path
+            
+            return current_path
+            
+        except Exception as e:
+            if self.debug:
+                print(f"冲突解决失败: {e}")
+            return current_path
     
     def _post_process_path(self, path):
         """路径后处理优化"""
@@ -733,12 +324,12 @@ class OptimizedPathPlanner:
         optimized = path
         
         # 捷径优化
-        if self.optimization_config['shortcut_optimization']:
+        if self.planning_config['enable_shortcut_optimization']:
             optimized = self._shortcut_optimization(optimized)
         
         # 平滑处理
-        if self.optimization_config['post_smoothing']:
-            optimized = self._smooth_path_advanced(optimized)
+        if self.planning_config['enable_post_smoothing']:
+            optimized = self._smooth_path(optimized)
         
         return optimized
     
@@ -768,113 +359,15 @@ class OptimizedPathPlanner:
                 i += 1
         
         return optimized
-    def find_accessible_points(self, position, rrt_planner, max_candidates=5, 
-                            sampling_step=10, max_distance=20.0):
-        """优化版可达点查找 - 修复版"""
-        start_time = time.time()
-        accessible_points = []
-        
-        try:
-            # 首先使用优化的连接点查找
-            nearest_connections = self.find_nearest_connection_optimized(
-                position, max_distance, max_candidates * 2
-            )
-            
-            if nearest_connections:
-                # 将单个结果转换为列表
-                if not isinstance(nearest_connections, list):
-                    nearest_connections = [nearest_connections]
-                
-                # 过滤掉 None 值和无效连接
-                valid_connections = []
-                for conn in nearest_connections:
-                    if (conn and isinstance(conn, dict) and 
-                        'id' in conn and 'position' in conn and 
-                        conn['position'] is not None):
-                        valid_connections.append(conn)
-                
-                for conn in valid_connections[:max_candidates]:
-                    if rrt_planner and rrt_planner.is_path_possible(position, conn['position']):
-                        # 确保所有必要的字段都存在
-                        point_info = {
-                            'conn_id': conn['id'],
-                            'path_id': conn.get('paths', [None])[0] if conn.get('paths') else None,
-                            'path_index': conn.get('path_index', 0),
-                            'position': conn['position'],
-                            'distance': conn.get('distance', 0),
-                            'type': 'connection',
-                            'quality': conn.get('quality_score', 0.5)
-                        }
-                        accessible_points.append(point_info)
-            
-            # 如果连接点不足，使用路径点KD树查找
-            if len(accessible_points) < max_candidates and hasattr(self, 'path_point_kdtree') and self.path_point_kdtree:
-                additional_needed = max_candidates - len(accessible_points)
-                
-                query_point = [position[0], position[1]]
-                try:
-                    distances, indices = self.path_point_kdtree.query(
-                        query_point,
-                        k=min(additional_needed * 3, len(self.path_point_info)),
-                        distance_upper_bound=max_distance
-                    )
-                    
-                    if not hasattr(distances, '__len__'):
-                        distances = [distances]
-                        indices = [indices]
-                    
-                    for dist, idx in zip(distances, indices):
-                        if (idx < len(self.path_point_info) and 
-                            dist <= max_distance and 
-                            not np.isinf(dist)):
-                            
-                            path_id, point_idx = self.path_point_info[idx]
-                            if (path_id in self.paths and 
-                                point_idx < len(self.paths[path_id]['path'])):
-                                
-                                point = self.paths[path_id]['path'][point_idx]
-                                
-                                if rrt_planner and rrt_planner.is_path_possible(position, point):
-                                    point_info = {
-                                        'conn_id': None,
-                                        'path_id': path_id,
-                                        'path_index': point_idx,
-                                        'position': point,
-                                        'distance': dist,
-                                        'type': 'path_point',
-                                        'quality': self.paths[path_id].get('quality_score', 0.5)
-                                    }
-                                    accessible_points.append(point_info)
-                                    
-                                    if len(accessible_points) >= max_candidates:
-                                        break
-                                    
-                except Exception as e:
-                    if self.debug:
-                        print(f"路径点查询失败: {e}")
-            
-            # 按质量和距离排序，过滤掉无效项
-            valid_points = [p for p in accessible_points if p and isinstance(p, dict)]
-            valid_points.sort(key=lambda x: (-x.get('quality', 0), x.get('distance', float('inf'))))
-            
-            # 更新性能统计
-            if hasattr(self, 'performance_stats'):
-                self.performance_stats['query_time'] += time.time() - start_time
-            
-            return valid_points[:max_candidates]
-            
-        except Exception as e:
-            if self.debug:
-                print(f"find_accessible_points 出错: {e}")
-            return []    
-    def _smooth_path_advanced(self, path, iterations=3):
-        """高级路径平滑"""
+    
+    def _smooth_path(self, path, iterations=2):
+        """路径平滑"""
         if len(path) <= 2:
             return path
         
         smoothed = list(path)
         
-        for iteration in range(iterations):
+        for _ in range(iterations):
             new_smoothed = [smoothed[0]]
             
             for i in range(1, len(smoothed) - 1):
@@ -882,18 +375,10 @@ class OptimizedPathPlanner:
                 curr = smoothed[i]
                 next_p = smoothed[i+1]
                 
-                # 自适应平滑权重
-                weight = self._calculate_adaptive_smooth_weight(prev, curr, next_p)
-                
-                # 加权平均
-                x = curr[0] * (1 - weight) + (prev[0] + next_p[0]) * weight / 2
-                y = curr[1] * (1 - weight) + (prev[1] + next_p[1]) * weight / 2
-                
-                # 角度处理
-                if len(curr) > 2:
-                    theta = curr[2]
-                else:
-                    theta = math.atan2(next_p[1] - prev[1], next_p[0] - prev[0])
+                # 简单的平均平滑
+                x = (prev[0] + curr[0] + next_p[0]) / 3
+                y = (prev[1] + curr[1] + next_p[1]) / 3
+                theta = curr[2] if len(curr) > 2 else 0
                 
                 # 验证平滑后的点
                 if self._is_valid_position(int(x), int(y)):
@@ -906,88 +391,18 @@ class OptimizedPathPlanner:
         
         return smoothed
     
-    def _calculate_adaptive_smooth_weight(self, prev, curr, next_p):
-        """计算自适应平滑权重"""
-        # 基于局部曲率调整权重
-        angle = self._calculate_turning_angle(prev, curr, next_p)
-        weight = min(0.6, angle / math.pi * 0.8)
-        
-        return weight
-    
-    # 缓存管理方法
-    def _generate_cache_key(self, vehicle_id, start, goal, use_backbone):
-        """生成缓存键"""
-        start_rounded = (round(start[0], 1), round(start[1], 1))
-        goal_rounded = (round(goal[0], 1), round(goal[1], 1))
-        
-        return f"{vehicle_id}:{start_rounded}:{goal_rounded}:{use_backbone}"
-    
-    def _check_cache(self, cache_key):
-        """检查缓存"""
-        if cache_key in self.route_cache:
-            # 检查是否过期
-            metadata = self.cache_metadata.get(cache_key, {})
-            current_time = time.time()
-            
-            if (current_time - metadata.get('timestamp', 0)) > self.cache_config['ttl']:
-                # 过期，删除
-                del self.route_cache[cache_key]
-                del self.cache_metadata[cache_key]
-                return None
-            
-            # 更新LRU
-            if self.cache_config['lru_enabled']:
-                self.route_cache.move_to_end(cache_key)
-            
-            # 更新命中计数
-            metadata['hit_count'] = metadata.get('hit_count', 0) + 1
-            
-            return self.route_cache[cache_key]
-        
-        return None
-    
-    def _add_to_cache(self, cache_key, result, quality):
-        """添加到缓存"""
-        # 检查缓存大小
-        if len(self.route_cache) >= self.cache_config['max_size']:
-            if self.cache_config['lru_enabled']:
-                # 删除最旧的项
-                oldest_key = next(iter(self.route_cache))
-                del self.route_cache[oldest_key]
-                del self.cache_metadata[oldest_key]
-        
-        # 添加新项
-        self.route_cache[cache_key] = result
-        self.cache_metadata[cache_key] = {
-            'timestamp': time.time(),
-            'quality': quality,
-            'hit_count': 0
-        }
-    
-    def _clear_cache(self):
-        """清空缓存"""
-        self.route_cache.clear()
-        self.cache_metadata.clear()
-    
-    # 分析和评估方法
     def _analyze_path_structure(self, path):
         """分析路径结构"""
         if not path or len(path) < 2:
             return {'type': 'empty'}
         
-        structure = {
+        return {
             'type': 'analyzed',
             'length': self._calculate_path_length(path),
             'segments': len(path) - 1,
-            'complexity': self._calculate_path_complexity(path)
+            'complexity': self._calculate_path_complexity(path),
+            'quality': self.quality_assessor.evaluate_path(path)
         }
-        
-        # 检查是否使用了骨干网络
-        if self.backbone_network:
-            backbone_usage = self._detect_backbone_usage(path)
-            structure.update(backbone_usage)
-        
-        return structure
     
     def _calculate_path_complexity(self, path):
         """计算路径复杂度"""
@@ -1003,47 +418,74 @@ class OptimizedPathPlanner:
         length = self._calculate_path_length(path)
         return total_turning / max(1, length) if length > 0 else 0
     
-    def _detect_backbone_usage(self, path):
-        """检测路径中骨干网络的使用情况"""
-        if not self.backbone_network or not path:
-            return {'uses_backbone': False}
+    def _calculate_turning_angle(self, p1, p2, p3):
+        """计算转弯角度"""
+        v1 = np.array([p2[0] - p1[0], p2[1] - p1[1]])
+        v2 = np.array([p3[0] - p2[0], p3[1] - p2[1]])
         
-        backbone_points = 0
-        total_points = len(path)
+        len_v1 = np.linalg.norm(v1)
+        len_v2 = np.linalg.norm(v2)
         
-        for point in path:
-            nearest_conn = self.backbone_network.find_nearest_connection_optimized(
-                point, max_distance=3.0
-            )
-            if nearest_conn:
-                backbone_points += 1
+        if len_v1 < 0.001 or len_v2 < 0.001:
+            return 0
         
-        usage_ratio = backbone_points / max(1, total_points)
+        cos_angle = np.dot(v1, v2) / (len_v1 * len_v2)
+        cos_angle = np.clip(cos_angle, -1.0, 1.0)
         
-        return {
-            'uses_backbone': usage_ratio > 0.3,
-            'backbone_ratio': usage_ratio,
-            'backbone_points': backbone_points
+        return math.acos(cos_angle)
+    
+    # 缓存管理方法
+    def _generate_cache_key(self, vehicle_id, start, goal):
+        """生成缓存键"""
+        start_rounded = (round(start[0], 1), round(start[1], 1))
+        goal_rounded = (round(goal[0], 1), round(goal[1], 1))
+        
+        return f"{vehicle_id}:{start_rounded}:{goal_rounded}"
+    
+    def _check_cache(self, cache_key):
+        """检查缓存"""
+        if cache_key in self.route_cache:
+            # 检查是否过期
+            metadata = self.cache_metadata.get(cache_key, {})
+            current_time = time.time()
+            
+            if (current_time - metadata.get('timestamp', 0)) > self.cache_config['ttl']:
+                # 过期，删除
+                del self.route_cache[cache_key]
+                del self.cache_metadata[cache_key]
+                return None
+            
+            # 更新LRU
+            self.route_cache.move_to_end(cache_key)
+            
+            # 更新命中计数
+            metadata['hit_count'] = metadata.get('hit_count', 0) + 1
+            
+            return self.route_cache[cache_key]
+        
+        return None
+    
+    def _add_to_cache(self, cache_key, result, quality):
+        """添加到缓存"""
+        # 检查缓存大小
+        if len(self.route_cache) >= self.cache_config['max_size']:
+            # 删除最旧的项
+            oldest_key = next(iter(self.route_cache))
+            del self.route_cache[oldest_key]
+            del self.cache_metadata[oldest_key]
+        
+        # 添加新项
+        self.route_cache[cache_key] = result
+        self.cache_metadata[cache_key] = {
+            'timestamp': time.time(),
+            'quality': quality,
+            'hit_count': 0
         }
     
-    def _calculate_path_cost(self, path):
-        """计算路径成本"""
-        if not path or len(path) < 2:
-            return float('inf')
-        
-        # 基础距离成本
-        distance_cost = self._calculate_path_length(path)
-        
-        # 转弯成本
-        turning_cost = 0
-        for i in range(1, len(path) - 1):
-            angle = self._calculate_turning_angle(path[i-1], path[i], path[i+1])
-            turning_cost += angle * 2  # 转弯惩罚
-        
-        # 复杂度成本
-        complexity_cost = self._calculate_path_complexity(path) * 10
-        
-        return distance_cost + turning_cost + complexity_cost
+    def _clear_cache(self):
+        """清空缓存"""
+        self.route_cache.clear()
+        self.cache_metadata.clear()
     
     # 工具方法
     def _validate_inputs(self, start, goal):
@@ -1074,7 +516,7 @@ class OptimizedPathPlanner:
         x2 = pos2[0] if len(pos2) > 0 else 0
         y2 = pos2[1] if len(pos2) > 1 else 0
         
-        return ((x1 - x2) ** 2 + (y1 - y2) ** 2) ** 0.5
+        return math.sqrt((x1 - x2)**2 + (y1 - y2)**2)
     
     def _calculate_path_length(self, path):
         """计算路径总长度"""
@@ -1112,6 +554,18 @@ class OptimizedPathPlanner:
         
         return True
     
+    def _validate_path(self, path):
+        """验证路径有效性"""
+        if not path or len(path) < 2:
+            return False
+        
+        # 基本碰撞检测
+        for i in range(len(path) - 1):
+            if not self._is_line_collision_free(path[i], path[i+1]):
+                return False
+        
+        return True
+    
     def get_performance_stats(self):
         """获取性能统计信息"""
         stats = self.performance_stats.copy()
@@ -1132,6 +586,11 @@ class OptimizedPathPlanner:
         if total_requests > 0:
             stats['cache_hit_rate'] = stats['cache_hits'] / total_requests
         
+        # 骨干网络使用率
+        total_planning = stats['backbone_usage'] + stats['direct_planning']
+        if total_planning > 0:
+            stats['backbone_success_rate'] = stats['backbone_usage'] / total_planning
+        
         return stats
     
     def reset_stats(self):
@@ -1140,27 +599,32 @@ class OptimizedPathPlanner:
             'total_requests': 0,
             'cache_hits': 0,
             'cache_misses': 0,
-            'backbone_successes': 0,
-            'direct_fallbacks': 0,
+            'backbone_usage': 0,
+            'direct_planning': 0,
             'planning_times': [],
             'quality_scores': [],
-            'strategy_usage': defaultdict(int)
+            'backbone_success_rate': 0.0
         }
+    
+    def set_debug(self, enable):
+        """设置调试模式"""
+        self.debug = enable
+        self.verbose_logging = enable
+        print(f"调试模式: {'开启' if enable else '关闭'}")
 
 
 class PathQualityAssessor:
-    """路径质量评估器"""
+    """路径质量评估器 - 简化版"""
     
     def __init__(self, env):
         self.env = env
         
         # 质量权重
         self.weights = {
-            'length_efficiency': 0.25,
-            'smoothness': 0.20,
-            'safety': 0.20,
-            'complexity': 0.15,
-            'clearance': 0.20
+            'length_efficiency': 0.3,
+            'smoothness': 0.3,
+            'safety': 0.2,
+            'complexity': 0.2
         }
     
     def evaluate_path(self, path):
@@ -1181,9 +645,6 @@ class PathQualityAssessor:
         
         # 复杂度
         scores['complexity'] = self._evaluate_complexity(path)
-        
-        # 间隙
-        scores['clearance'] = self._evaluate_clearance(path)
         
         # 加权总分
         total_score = sum(
@@ -1230,12 +691,10 @@ class PathQualityAssessor:
     
     def _evaluate_safety(self, path):
         """评估路径安全性"""
-        if not path:
-            return 0
-        
+        # 简化实现：基于路径点的安全间隙
         min_safety = 1.0
         
-        for point in path[::max(1, len(path)//20)]:  # 采样检查
+        for point in path[::max(1, len(path)//10)]:  # 采样检查
             safety = self._calculate_point_safety(point)
             min_safety = min(min_safety, safety)
         
@@ -1256,25 +715,6 @@ class PathQualityAssessor:
         
         complexity_score = 1.0 - (sharp_turns / max(1, total_segments))
         return max(0, complexity_score)
-    
-    def _evaluate_clearance(self, path):
-        """评估路径间隙"""
-        if not path:
-            return 0
-        
-        min_clearance = float('inf')
-        
-        for point in path[::max(1, len(path)//10)]:  # 采样检查
-            clearance = self._calculate_clearance(point)
-            min_clearance = min(min_clearance, clearance)
-        
-        # 转换为评分
-        if min_clearance >= 5:
-            return 1.0
-        elif min_clearance >= 2:
-            return 0.5 + 0.5 * (min_clearance - 2) / 3
-        else:
-            return 0.5 * min_clearance / 2
     
     def _calculate_curvature(self, p1, p2, p3):
         """计算曲率"""
@@ -1362,5 +802,7 @@ class PathQualityAssessor:
         
         return length
 
+
 # 保持向后兼容性
-PathPlanner = OptimizedPathPlanner
+OptimizedPathPlanner = SimplifiedPathPlanner
+PathPlanner = SimplifiedPathPlanner

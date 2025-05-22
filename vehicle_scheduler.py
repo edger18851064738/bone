@@ -5,7 +5,7 @@ from typing import List, Dict, Tuple, Set, Optional, Any
 from collections import defaultdict
 
 class VehicleTask:
-    """车辆任务类 - 增强版"""
+    """车辆任务类 - 优化版"""
     
     def __init__(self, task_id, task_type, start, goal, priority=1, 
                  loading_point_id=None, unloading_point_id=None):
@@ -22,24 +22,23 @@ class VehicleTask:
         self.start_time = 0
         self.completion_time = 0
         
-        # 新增: 装载点和卸载点ID
+        # 装载点和卸载点ID
         self.loading_point_id = loading_point_id
         self.unloading_point_id = unloading_point_id
         
-        # 新增: 保存路径结构
+        # 简化的路径结构信息 - 按照新的设计理念
         self.path_structure = {
-            'type': 'unknown',  # 'three_segment', 'direct', 'hybrid'
-            'entry_point': None,
-            'exit_point': None,
-            'backbone_segment': None,
-            'to_backbone_path': None,
-            'backbone_path': None,
-            'from_backbone_path': None
+            'type': 'unknown',  # 'backbone_assisted', 'direct'
+            'uses_backbone': False,
+            'backbone_path_id': None,
+            'backbone_utilization': 0.0,  # 骨干路径占总路径的比例
+            'access_length': 0,  # 接入路径长度
+            'backbone_length': 0,  # 骨干路径长度
+            'total_length': 0  # 总路径长度
         }
         
-        # 新增: 质量评估
+        # 质量评估
         self.quality_score = 0.0
-        self.backbone_utilization = 0.0  # 骨干网络利用率
     
     def to_dict(self):
         """转换为字典表示"""
@@ -58,36 +57,47 @@ class VehicleTask:
             'loading_point_id': self.loading_point_id,
             'unloading_point_id': self.unloading_point_id,
             'quality_score': self.quality_score,
-            'backbone_utilization': self.backbone_utilization
+            'backbone_utilization': self.path_structure.get('backbone_utilization', 0.0),
+            'uses_backbone': self.path_structure.get('uses_backbone', False)
         }
     
     def update_path_structure(self, structure):
-        """更新路径结构信息"""
-        if structure:
-            self.path_structure.update(structure)
-            
-            # 计算骨干网络利用率
-            if self.path and structure.get('backbone_path'):
-                backbone_length = self._calculate_path_length(structure['backbone_path'])
-                total_length = self._calculate_path_length(self.path)
-                self.backbone_utilization = backbone_length / max(total_length, 1.0)
+        """更新路径结构信息 - 简化版"""
+        if not structure:
+            return
+        
+        # 更新基本结构信息
+        self.path_structure.update(structure)
+        
+        # 计算骨干网络利用率
+        if structure.get('type') == 'backbone_assisted':
+            self.path_structure['uses_backbone'] = True
+            self.path_structure['backbone_utilization'] = structure.get('backbone_utilization', 0.0)
+            self.path_structure['backbone_path_id'] = structure.get('backbone_path_id')
+            self.path_structure['access_length'] = structure.get('access_length', 0)
+            self.path_structure['backbone_length'] = structure.get('backbone_length', 0)
+            self.path_structure['total_length'] = structure.get('total_length', 0)
+        elif structure.get('type') == 'direct':
+            self.path_structure['uses_backbone'] = False
+            self.path_structure['backbone_utilization'] = 0.0
+            if self.path:
+                self.path_structure['total_length'] = len(self.path)
+        
+        # 设置最终质量评分
+        if 'final_quality' in structure:
+            self.quality_score = structure['final_quality']
+
+
+class SimplifiedVehicleScheduler:
+    """
+    简化的车辆调度器 - 按照用户设计理念重新实现
     
-    def _calculate_path_length(self, path):
-        """计算路径长度"""
-        if not path or len(path) < 2:
-            return 0
-        
-        length = 0
-        for i in range(len(path) - 1):
-            dx = path[i+1][0] - path[i][0]
-            dy = path[i+1][1] - path[i][1]
-            length += math.sqrt(dx*dx + dy*dy)
-        
-        return length
-
-
-class VehicleScheduler:
-    """车辆调度器，管理任务分配和调度 - 增强版"""
+    设计理念：
+    1. 简化路径规划调用，直接使用新的骨干网络接口
+    2. 移除复杂的路径结构分析
+    3. 保留核心的任务管理和调度功能
+    4. 优化与简化的组件集成
+    """
     
     def __init__(self, env, path_planner=None, backbone_network=None, traffic_manager=None):
         self.env = env
@@ -109,28 +119,38 @@ class VehicleScheduler:
             'total_time': 0,
             'vehicle_utilization': {},
             'backbone_usage_efficiency': 0.0,
-            'conflict_resolution_count': 0
+            'conflict_resolution_count': 0,
+            'backbone_assisted_paths': 0,
+            'direct_paths': 0
         }
         
         # 点位使用情况跟踪
         self.loading_point_usage = {}  # {point_id: usage_count}
         self.unloading_point_usage = {}  # {point_id: usage_count}
         
-        # 路径结构缓存和质量评估
-        self.path_structure_cache = {}
-        self.quality_assessor = PathQualityAssessor() if 'PathQualityAssessor' in globals() else None
+        # 调度配置
+        self.scheduling_config = {
+            'enable_backbone_priority': True,
+            'max_task_queue_length': 5,
+            'task_timeout': 300,  # 5分钟超时
+            'enable_quality_tracking': True
+        }
+        
+        print("初始化简化的车辆调度器")
     
     def set_path_planner(self, path_planner):
         """设置路径规划器"""
         self.path_planner = path_planner
         if self.path_planner and self.backbone_network:
             self.path_planner.set_backbone_network(self.backbone_network)
+        print("已设置路径规划器")
     
     def set_backbone_network(self, backbone_network):
         """设置骨干路径网络"""
         self.backbone_network = backbone_network
         if self.path_planner:
             self.path_planner.set_backbone_network(backbone_network)
+        print("已设置骨干路径网络")
     
     def set_traffic_manager(self, traffic_manager):
         """设置交通管理器"""
@@ -153,7 +173,9 @@ class VehicleScheduler:
                 'idle_time': 0,
                 'preferred_loading_point': None,
                 'preferred_unloading_point': None,
-                'task_queue': []  # 新增: 详细任务队列信息
+                'task_queue': [],  # 详细任务队列信息
+                'backbone_usage_count': 0,  # 使用骨干路径次数
+                'direct_path_count': 0  # 直接路径次数
             }
             
             # 初始化任务队列
@@ -369,11 +391,12 @@ class VehicleScheduler:
             # 检查骨干网络可达性加分
             backbone_score = 1.0
             if self.backbone_network:
-                accessible_points = self.backbone_network.find_accessible_points(
-                    position, None, max_candidates=1
-                )
-                if accessible_points:
-                    backbone_score = 1.2
+                # 简化检查：如果有到该装载点的骨干路径，加分
+                target_type, target_id = self.backbone_network.identify_target_point(point)
+                if target_type == 'loading' and target_id == i:
+                    paths_to_target = self.backbone_network.find_paths_to_target('loading', i)
+                    if paths_to_target:
+                        backbone_score = 1.2
             
             # 总分
             score = distance_score * 0.6 + usage_score * 0.3 + backbone_score * 0.1
@@ -412,11 +435,11 @@ class VehicleScheduler:
             # 检查骨干网络可达性
             backbone_score = 1.0
             if self.backbone_network:
-                accessible_points = self.backbone_network.find_accessible_points(
-                    position, None, max_candidates=1
-                )
-                if accessible_points:
-                    backbone_score = 1.2
+                target_type, target_id = self.backbone_network.identify_target_point(point)
+                if target_type == 'unloading' and target_id == i:
+                    paths_to_target = self.backbone_network.find_paths_to_target('unloading', i)
+                    if paths_to_target:
+                        backbone_score = 1.2
             
             # 总分
             score = distance_score * 0.6 + usage_score * 0.3 + backbone_score * 0.1
@@ -428,7 +451,7 @@ class VehicleScheduler:
         return best_point_id
     
     def _start_next_task(self, vehicle_id):
-        """开始执行车辆的下一个任务"""
+        """开始执行车辆的下一个任务 - 简化版"""
         if vehicle_id not in self.task_queues or not self.task_queues[vehicle_id]:
             return False
         
@@ -441,17 +464,16 @@ class VehicleScheduler:
         task.assigned_vehicle = vehicle_id
         task.start_time = self.env.current_time if hasattr(self.env, 'current_time') else 0
         
-        # 更新车辆状态 - 修复：同步更新env.vehicles
+        # 更新车辆状态 - 同步到环境
         self.vehicle_statuses[vehicle_id]['status'] = 'moving'
         self.vehicle_statuses[vehicle_id]['current_task'] = task_id
         
-        # 关键修复：同步状态到环境对象
         if vehicle_id in self.env.vehicles:
-            self.env.vehicles[vehicle_id]['status'] = 'moving'  # 添加这行
+            self.env.vehicles[vehicle_id]['status'] = 'moving'
         
-        # 规划路径
+        # 规划路径 - 使用简化的规划方法
         if self.path_planner:
-            path_result = self._plan_path_with_backbone(
+            path_result = self._plan_vehicle_path(
                 vehicle_id,
                 self.vehicle_statuses[vehicle_id]['position'],
                 task.goal
@@ -459,22 +481,33 @@ class VehicleScheduler:
             
             if path_result:
                 if isinstance(path_result, tuple) and len(path_result) == 2:
-                    # 包含结构信息的结果
+                    # 路径和结构信息
                     task.path, structure = path_result
                     task.update_path_structure(structure)
+                    
+                    # 更新统计信息
+                    if structure.get('type') == 'backbone_assisted':
+                        self.stats['backbone_assisted_paths'] += 1
+                        self.vehicle_statuses[vehicle_id]['backbone_usage_count'] += 1
+                    else:
+                        self.stats['direct_paths'] += 1
+                        self.vehicle_statuses[vehicle_id]['direct_path_count'] += 1
+                        
                 else:
-                    # 只有路径的结果
+                    # 只有路径
                     task.path = path_result
+                    task.update_path_structure({'type': 'direct'})
+                    self.stats['direct_paths'] += 1
+                    self.vehicle_statuses[vehicle_id]['direct_path_count'] += 1
                 
-                # 评估路径质量
-                if self.quality_assessor:
-                    task.quality_score = self.quality_assessor.evaluate_path(task.path)
-                
-                # 更新车辆路径
+                # 更新车辆路径信息
                 if vehicle_id in self.env.vehicles and task.path:
                     self.env.vehicles[vehicle_id]['path'] = task.path
                     self.env.vehicles[vehicle_id]['path_index'] = 0
                     self.env.vehicles[vehicle_id]['progress'] = 0.0
+                    
+                    # 保存路径结构到车辆信息中
+                    self.env.vehicles[vehicle_id]['path_structure'] = task.path_structure
                     
                     # 向交通管理器注册路径
                     if self.traffic_manager:
@@ -483,118 +516,35 @@ class VehicleScheduler:
                             task.path,
                             task.start_time
                         )
+                        
+                print(f"车辆 {vehicle_id} 开始任务 {task_id}，"
+                      f"路径类型: {task.path_structure.get('type', 'unknown')}，"
+                      f"骨干利用率: {task.path_structure.get('backbone_utilization', 0):.2f}")
         
         return True
     
-    def _plan_path_with_backbone(self, vehicle_id, start, goal):
-        """使用骨干网络规划路径"""
+    def _plan_vehicle_path(self, vehicle_id, start, goal):
+        """
+        为车辆规划路径 - 简化版
+        直接使用新的路径规划器接口
+        """
         if not self.path_planner:
             return None
         
-        # 如果有骨干网络且规划器支持，使用增强规划
-        if self.backbone_network and hasattr(self.path_planner, 'plan_path'):
-            # 确保规划器已设置骨干网络
-            if hasattr(self.path_planner, 'set_backbone_network'):
-                self.path_planner.set_backbone_network(self.backbone_network)
-            
-            # 规划路径，启用骨干网络
-            result = self.path_planner.plan_path(vehicle_id, start, goal, use_backbone=True)
-            
-            # 检查结果格式
-            if isinstance(result, tuple) and len(result) == 2:
-                path, structure = result
-                return path, structure
-            elif result:
-                # 只返回路径，分析结构
-                structure = self._analyze_path_structure(result)
-                return result, structure
-        
-        # 回退到普通路径规划
-        if hasattr(self.path_planner, 'plan_path'):
-            path = self.path_planner.plan_path(vehicle_id, start, goal)
-            if path:
-                structure = self._analyze_path_structure(path)
-                return path, structure
-        
-        return None
-    
-    def _analyze_path_structure(self, path):
-        """分析路径，识别骨干网络部分"""
-        if not self.backbone_network or not path or len(path) < 2:
-            return {
-                'type': 'direct',
-                'entry_point': None,
-                'exit_point': None,
-                'backbone_segment': None,
-                'to_backbone_path': path,
-                'backbone_path': None,
-                'from_backbone_path': None
-            }
-        
-        # 寻找进入和离开骨干网络的点
-        entry_point = None
-        entry_index = -1
-        exit_point = None
-        exit_index = -1
-        backbone_segment = None
-        
-        # 遍历路径点，寻找最接近骨干网络的点
-        for i, point in enumerate(path):
-            # 查找最近的骨干连接点
-            if hasattr(self.backbone_network, 'find_nearest_connection_optimized'):
-                nearest_conn = self.backbone_network.find_nearest_connection_optimized(
-                    point, max_distance=5.0
-                )
+        try:
+            # 使用简化的路径规划接口
+            if hasattr(self.path_planner, 'plan_path_with_backbone'):
+                # 优先使用专用接口
+                result = self.path_planner.plan_path_with_backbone(vehicle_id, start, goal)
             else:
-                nearest_conn = None
+                # 使用通用接口
+                result = self.path_planner.plan_path(vehicle_id, start, goal, use_backbone=True)
             
-            if nearest_conn:
-                if entry_point is None:
-                    entry_point = nearest_conn
-                    entry_index = i
-                    backbone_segment = nearest_conn.get('path_id') or nearest_conn.get('id')
-                else:
-                    exit_point = nearest_conn
-                    exit_index = i
-        
-        # 根据找到的点划分路径
-        if entry_index >= 0 and exit_index > entry_index:
-            to_backbone = path[:entry_index+1]
-            backbone = path[entry_index:exit_index+1]
-            from_backbone = path[exit_index:]
+            return result
             
-            return {
-                'type': 'three_segment',
-                'entry_point': entry_point,
-                'exit_point': exit_point,
-                'backbone_segment': backbone_segment,
-                'to_backbone_path': to_backbone,
-                'backbone_path': backbone,
-                'from_backbone_path': from_backbone
-            }
-        elif entry_index >= 0:
-            to_backbone = path[:entry_index+1]
-            backbone = path[entry_index:]
-            
-            return {
-                'type': 'hybrid',
-                'entry_point': entry_point,
-                'exit_point': None,
-                'backbone_segment': backbone_segment,
-                'to_backbone_path': to_backbone,
-                'backbone_path': backbone,
-                'from_backbone_path': None
-            }
-        else:
-            return {
-                'type': 'direct',
-                'entry_point': None,
-                'exit_point': None,
-                'backbone_segment': None,
-                'to_backbone_path': path,
-                'backbone_path': None,
-                'from_backbone_path': None
-            }
+        except Exception as e:
+            print(f"车辆 {vehicle_id} 路径规划失败: {e}")
+            return None
     
     def update(self, time_delta):
         """更新所有车辆状态和任务进度"""
@@ -681,13 +631,10 @@ class VehicleScheduler:
                         vehicle['path_index'] = path_index
                         vehicle['progress'] = progress
                         
-                        # 确保状态保持moving - 修复点
+                        # 确保状态保持moving
                         if vehicle['status'] != 'moving':
                             vehicle['status'] = 'moving'
                             status['status'] = 'moving'
-                        
-                        # 检查骨干网络转换
-                        self._check_backbone_transition(vehicle_id, current_task, path_index)
                 else:
                     # 在当前路径段内插值计算位置
                     self._interpolate_position(vehicle_id, vehicle, path, path_index, progress)
@@ -753,35 +700,6 @@ class VehicleScheduler:
             # 开始下一个任务
             self._start_next_task(vehicle_id)
     
-    def _check_backbone_transition(self, vehicle_id, task, path_index):
-        """检查车辆是否进入或离开骨干网络"""
-        if not task.path_structure or task.path_structure['type'] != 'three_segment':
-            return
-        
-        # 计算路径段边界
-        to_backbone_len = len(task.path_structure.get('to_backbone_path', []))
-        backbone_len = len(task.path_structure.get('backbone_path', []))
-        
-        entry_index = to_backbone_len - 1 if to_backbone_len > 0 else -1
-        exit_index = to_backbone_len + backbone_len - 1 if backbone_len > 0 else -1
-        
-        # 检查进入骨干网络
-        if entry_index >= 0 and path_index == entry_index:
-            if self.backbone_network and task.path_structure.get('backbone_segment'):
-                # 更新骨干网络流量
-                self._update_backbone_traffic(task.path_structure['backbone_segment'], 1)
-        
-        # 检查离开骨干网络
-        if exit_index >= 0 and path_index == exit_index:
-            if self.backbone_network and task.path_structure.get('backbone_segment'):
-                # 更新骨干网络流量
-                self._update_backbone_traffic(task.path_structure['backbone_segment'], -1)
-    
-    def _update_backbone_traffic(self, segment_id, change):
-        """更新骨干网络交通流量"""
-        if hasattr(self.backbone_network, 'update_traffic_flow'):
-            self.backbone_network.update_traffic_flow(segment_id, change)
-    
     def _handle_task_completion(self, vehicle_id, task_id):
         """处理任务完成"""
         if task_id not in self.tasks or vehicle_id not in self.vehicle_statuses:
@@ -795,7 +713,7 @@ class VehicleScheduler:
             # 到达装载点，开始装载
             status['status'] = 'loading'
             if vehicle_id in self.env.vehicles:
-                self.env.vehicles[vehicle_id]['status'] = 'loading'  # 修复：同步状态
+                self.env.vehicles[vehicle_id]['status'] = 'loading'
                 self.env.vehicles[vehicle_id]['loading_progress'] = 0
             
             # 记录使用的装载点
@@ -806,7 +724,7 @@ class VehicleScheduler:
             # 到达卸载点，开始卸载
             status['status'] = 'unloading'
             if vehicle_id in self.env.vehicles:
-                self.env.vehicles[vehicle_id]['status'] = 'unloading'  # 修复：同步状态
+                self.env.vehicles[vehicle_id]['status'] = 'unloading'
                 self.env.vehicles[vehicle_id]['unloading_progress'] = 0
             
             # 记录使用的卸载点
@@ -846,7 +764,7 @@ class VehicleScheduler:
                 status['status'] = 'idle'
                 status['current_task'] = None
                 if vehicle_id in self.env.vehicles:
-                    self.env.vehicles[vehicle_id]['status'] = 'idle'  # 修复：同步状态
+                    self.env.vehicles[vehicle_id]['status'] = 'idle'
     
     def _complete_task(self, vehicle_id, task_id):
         """完成任务并更新统计信息"""
@@ -884,10 +802,8 @@ class VehicleScheduler:
         if self.traffic_manager:
             self.traffic_manager.release_vehicle_path(vehicle_id)
         
-        # 清理骨干网络上的流量
-        if (self.backbone_network and task.path_structure and 
-            task.path_structure.get('backbone_segment')):
-            self._update_backbone_traffic(task.path_structure['backbone_segment'], -1)
+        print(f"任务 {task_id} 完成，车辆 {vehicle_id}，"
+              f"使用骨干路径: {task.path_structure.get('uses_backbone', False)}")
     
     def get_vehicle_info(self, vehicle_id):
         """获取车辆详细信息"""
@@ -901,14 +817,15 @@ class VehicleScheduler:
             task = self.tasks[info['current_task']]
             task_info = task.to_dict()
             
-            # 添加路径结构信息
+            # 添加简化的路径结构信息
             if task.path_structure:
-                task_info['path_structure'] = {}
-                for key, value in task.path_structure.items():
-                    if key in ['entry_point', 'exit_point', 'backbone_segment', 'type']:
-                        task_info['path_structure'][key] = value
-                    elif key in ['to_backbone_path', 'backbone_path', 'from_backbone_path'] and value:
-                        task_info['path_structure'][key] = len(value)
+                task_info['path_structure'] = {
+                    'type': task.path_structure.get('type', 'unknown'),
+                    'uses_backbone': task.path_structure.get('uses_backbone', False),
+                    'backbone_utilization': task.path_structure.get('backbone_utilization', 0.0),
+                    'backbone_path_id': task.path_structure.get('backbone_path_id'),
+                    'total_length': task.path_structure.get('total_length', 0)
+                }
             
             info['current_task_info'] = task_info
         
@@ -926,12 +843,20 @@ class VehicleScheduler:
             self.stats['average_utilization'] = total_utilization / len(self.vehicle_statuses)
         
         # 计算骨干网络使用效率
-        if self.tasks:
-            backbone_tasks = [t for t in self.tasks.values() 
-                            if t.backbone_utilization > 0]
-            if backbone_tasks:
-                avg_backbone_util = sum(t.backbone_utilization for t in backbone_tasks) / len(backbone_tasks)
-                self.stats['backbone_usage_efficiency'] = avg_backbone_util
+        total_paths = self.stats['backbone_assisted_paths'] + self.stats['direct_paths']
+        if total_paths > 0:
+            self.stats['backbone_usage_efficiency'] = self.stats['backbone_assisted_paths'] / total_paths
+        
+        # 计算车辆级别的骨干使用统计
+        backbone_usage_by_vehicle = {}
+        for vehicle_id, status in self.vehicle_statuses.items():
+            total_vehicle_paths = status['backbone_usage_count'] + status['direct_path_count']
+            if total_vehicle_paths > 0:
+                backbone_usage_by_vehicle[vehicle_id] = status['backbone_usage_count'] / total_vehicle_paths
+            else:
+                backbone_usage_by_vehicle[vehicle_id] = 0.0
+        
+        self.stats['backbone_usage_by_vehicle'] = backbone_usage_by_vehicle
         
         return self.stats
     
@@ -942,7 +867,7 @@ class VehicleScheduler:
         x2 = pos2[0] if len(pos2) > 0 else 0
         y2 = pos2[1] if len(pos2) > 1 else 0
         
-        return ((x1 - x2) ** 2 + (y1 - y2) ** 2) ** 0.5
+        return math.sqrt((x1 - x2)**2 + (y1 - y2)**2)
     
     def _calculate_distance_path(self, path):
         """计算路径总长度"""
@@ -956,8 +881,8 @@ class VehicleScheduler:
         return length
 
 
-class ECBSVehicleScheduler(VehicleScheduler):
-    """ECBS增强版车辆调度器 - 基于优化后的VehicleScheduler"""
+class SimplifiedECBSVehicleScheduler(SimplifiedVehicleScheduler):
+    """简化的ECBS增强版车辆调度器"""
     
     def __init__(self, env, path_planner=None, traffic_manager=None, backbone_network=None):
         super().__init__(env, path_planner, backbone_network, traffic_manager)
@@ -972,12 +897,10 @@ class ECBSVehicleScheduler(VehicleScheduler):
         
         # 批量规划参数
         self.batch_planning = True
-        self.max_batch_size = 10
+        self.max_batch_size = 8
         self.planning_horizon = 100.0
         
-        # 性能优化
-        self.parallel_execution = True
-        self.max_parallel_vehicles = 5
+        print("初始化简化的ECBS车辆调度器")
     
     def initialize_vehicles(self):
         """初始化车辆状态，并设置初始优先级"""
@@ -1066,14 +989,23 @@ class ECBSVehicleScheduler(VehicleScheduler):
             # 点位偏好匹配
             preference_factor = self._calculate_preference_factor(task, status)
             
+            # 骨干网络使用偏好
+            backbone_factor = 1.0
+            if self.backbone_network and task.goal:
+                target_type, target_id = self.backbone_network.identify_target_point(task.goal)
+                if target_type:
+                    paths = self.backbone_network.find_paths_to_target(target_type, target_id)
+                    if paths:
+                        backbone_factor = 1.1  # 有骨干路径可用，轻微加分
+            
             # 总分
-            score = (distance_score * 0.3 + load_factor * 0.25 + 
+            score = (distance_score * 0.25 + load_factor * 0.2 + 
                     priority_factor * 0.2 + conflict_factor * 0.15 + 
-                    preference_factor * 0.1)
+                    preference_factor * 0.1 + backbone_factor * 0.1)
             
             # 空闲车辆加分
             if status['status'] == 'idle':
-                score *= 1.5
+                score *= 1.3
             
             if score > best_score:
                 best_score = score
@@ -1099,24 +1031,23 @@ class ECBSVehicleScheduler(VehicleScheduler):
         if (task.task_type == 'to_loading' and 
             status['preferred_loading_point'] is not None and
             task.loading_point_id == status['preferred_loading_point']):
-            factor = 1.5
+            factor = 1.3
         
         if (task.task_type == 'to_unloading' and 
             status['preferred_unloading_point'] is not None and
             task.unloading_point_id == status['preferred_unloading_point']):
-            factor = 1.5
+            factor = 1.3
         
         return factor
     
     def _plan_coordinated_paths(self, vehicle_ids):
-        """为多个车辆规划协调的无冲突路径"""
+        """为多个车辆规划协调的无冲突路径 - 简化版"""
         if not self.traffic_manager or not vehicle_ids:
             return False
         
         # 收集车辆路径需求
         paths = {}
         vehicle_tasks = {}
-        path_structures = {}
         
         for vehicle_id in vehicle_ids:
             task_id = self.vehicle_statuses[vehicle_id]['current_task']
@@ -1127,24 +1058,18 @@ class ECBSVehicleScheduler(VehicleScheduler):
             vehicle_tasks[vehicle_id] = task
             
             # 规划初始路径
-            path_result = self._plan_structured_path(vehicle_id, task.start, task.goal)
+            path_result = self._plan_vehicle_path(vehicle_id, task.start, task.goal)
             
             if path_result:
                 if isinstance(path_result, tuple):
                     path, structure = path_result
                     paths[vehicle_id] = path
-                    path_structures[vehicle_id] = structure
                 else:
                     paths[vehicle_id] = path_result
-                    path_structures[vehicle_id] = self._analyze_path_structure(path_result)
         
         # 使用交通管理器解决冲突
         if len(paths) > 1:
-            conflict_free_paths = self.traffic_manager.resolve_conflicts(
-                paths, 
-                backbone_network=self.backbone_network,
-                path_structures=path_structures
-            )
+            conflict_free_paths = self.traffic_manager.resolve_conflicts(paths)
             
             if conflict_free_paths:
                 # 更新任务和车辆的路径
@@ -1152,7 +1077,7 @@ class ECBSVehicleScheduler(VehicleScheduler):
                     if vehicle_id in vehicle_tasks:
                         task = vehicle_tasks[vehicle_id]
                         task.path = path
-                        task.update_path_structure(path_structures.get(vehicle_id, {}))
+                        task.update_path_structure({'type': 'conflict_resolved'})
                         
                         # 注册路径到交通管理器
                         self.traffic_manager.register_vehicle_path(
@@ -1170,26 +1095,6 @@ class ECBSVehicleScheduler(VehicleScheduler):
         
         return False
     
-    def _plan_structured_path(self, vehicle_id, start, goal):
-        """规划具有结构的路径"""
-        if not self.path_planner or not self.backbone_network:
-            # 没有骨干网络，使用普通规划
-            if self.path_planner:
-                path = self.path_planner.plan_path(vehicle_id, start, goal)
-                return path, {'type': 'direct', 'to_backbone_path': path}
-            return None
-        
-        # 使用增强的路径规划器
-        result = self.path_planner.plan_path(vehicle_id, start, goal, use_backbone=True)
-        
-        if isinstance(result, tuple):
-            return result
-        elif result:
-            structure = self._analyze_path_structure(result)
-            return result, structure
-        
-        return None
-    
     def update(self, time_delta):
         """更新所有车辆状态，包括ECBS冲突检测和解决"""
         # 首先更新车辆状态
@@ -1199,17 +1104,13 @@ class ECBSVehicleScheduler(VehicleScheduler):
         if self.traffic_manager:
             self._check_and_resolve_execution_conflicts()
         
-        # 选择下一批任务
-        self._select_next_batch_tasks()
-        
         return True
     
     def _check_and_resolve_execution_conflicts(self):
-        """检查并解决执行中的路径冲突"""
+        """检查并解决执行中的路径冲突 - 简化版"""
         # 收集当前活动的车辆和路径
         active_vehicles = []
         active_paths = {}
-        path_structures = {}
         
         for vehicle_id, status in self.vehicle_statuses.items():
             if status['status'] == 'moving' and status['current_task']:
@@ -1223,35 +1124,28 @@ class ECBSVehicleScheduler(VehicleScheduler):
                         path_index = vehicle.get('path_index', 0)
                         path = self.tasks[task_id].path[path_index:]
                         
-                        active_paths[vehicle_id] = path
-                        
-                        # 保存路径结构信息
-                        task = self.tasks[task_id]
-                        if task.path_structure:
-                            path_structures[vehicle_id] = task.path_structure
+                        if len(path) > 1:  # 确保有足够的路径进行冲突检测
+                            active_paths[vehicle_id] = path
         
         # 如果有多个活动车辆，检查冲突
-        if len(active_vehicles) > 1:
+        if len(active_vehicles) > 1 and len(active_paths) > 1:
             conflicts = self.traffic_manager.detect_conflicts(active_paths)
             
             if conflicts:
                 # 记录冲突车辆
                 for conflict in conflicts:
-                    self.conflict_counts[conflict.agent1] = \
-                        self.conflict_counts.get(conflict.agent1, 0) + 1
-                    self.conflict_counts[conflict.agent2] = \
-                        self.conflict_counts.get(conflict.agent2, 0) + 1
+                    if hasattr(conflict, 'agent1') and hasattr(conflict, 'agent2'):
+                        self.conflict_counts[conflict.agent1] = \
+                            self.conflict_counts.get(conflict.agent1, 0) + 1
+                        self.conflict_counts[conflict.agent2] = \
+                            self.conflict_counts.get(conflict.agent2, 0) + 1
                 
                 # 统计冲突解决次数
                 self.stats['conflict_resolution_count'] += len(conflicts)
                 
                 # 使用ECBS解决冲突
                 if self.conflict_resolution_strategy == 'ecbs':
-                    new_paths = self.traffic_manager.resolve_conflicts(
-                        active_paths,
-                        backbone_network=self.backbone_network,
-                        path_structures=path_structures
-                    )
+                    new_paths = self.traffic_manager.resolve_conflicts(active_paths)
                     
                     if new_paths:
                         self._apply_conflict_resolution(new_paths, active_vehicles)
@@ -1264,9 +1158,7 @@ class ECBSVehicleScheduler(VehicleScheduler):
                 if task_id in self.tasks:
                     # 更新任务路径
                     self.tasks[task_id].path = path
-                    self.tasks[task_id].update_path_structure(
-                        self._analyze_path_structure(path)
-                    )
+                    self.tasks[task_id].update_path_structure({'type': 'conflict_resolved'})
                     
                     # 更新车辆路径
                     self.env.vehicles[vehicle_id]['path'] = path
@@ -1279,70 +1171,6 @@ class ECBSVehicleScheduler(VehicleScheduler):
                         vehicle_id, path,
                         self.env.current_time if hasattr(self.env, 'current_time') else 0
                     )
-    
-    def _select_next_batch_tasks(self):
-        """选择下一批要执行的任务"""
-        # 寻找空闲车辆
-        available_vehicles = [
-            vehicle_id for vehicle_id, status in self.vehicle_statuses.items()
-            if (status['status'] == 'idle' and 
-                vehicle_id in self.task_queues and 
-                self.task_queues[vehicle_id])
-        ]
-        
-        if not available_vehicles:
-            return
-        
-        # 按优先级排序
-        sorted_vehicles = sorted(
-            available_vehicles,
-            key=lambda v: self.vehicle_priorities.get(v, 1),
-            reverse=True
-        )
-        
-        # 限制同时执行的车辆数量
-        batch_vehicles = sorted_vehicles[:self.max_parallel_vehicles]
-        
-        # 为选定车辆启动任务
-        if len(batch_vehicles) > 1 and self.batch_planning:
-            self._plan_coordinated_paths(batch_vehicles)
-        else:
-            for vehicle_id in batch_vehicles:
-                self._start_next_task(vehicle_id)
-    
-    def create_ecbs_mission_template(self, template_id, loading_point=None, unloading_point=None):
-        """创建带有ECBS特性的任务模板"""
-        if not super().create_mission_template(template_id, loading_point, unloading_point):
-            return False
-        
-        # 增强任务优先级设置
-        template = self.mission_templates[template_id]
-        
-        for task in template:
-            if task['task_type'] == 'to_loading':
-                task['priority'] = 2
-            elif task['task_type'] == 'to_unloading':
-                task['priority'] = 3
-            elif task['task_type'] == 'to_initial':
-                task['priority'] = 1
-        
-        return True
-    
-    def assign_mission(self, vehicle_id, template_id):
-        """以ECBS感知方式分配任务"""
-        if not super().assign_mission(vehicle_id, template_id):
-            return False
-        
-        # 更新任务优先级
-        current_prio = self.vehicle_priorities.get(vehicle_id, 1)
-        
-        if vehicle_id in self.task_queues:
-            for task_id in self.task_queues[vehicle_id]:
-                if task_id in self.tasks:
-                    self.tasks[task_id].priority *= current_prio / 10.0
-                    self.task_priorities[task_id] = self.tasks[task_id].priority
-        
-        return True
     
     def get_vehicle_info(self, vehicle_id):
         """获取车辆详细信息，包括ECBS特有信息"""
@@ -1372,95 +1200,6 @@ class ECBSVehicleScheduler(VehicleScheduler):
         return stats
 
 
-# 简化的路径质量评估器
-class PathQualityAssessor:
-    """路径质量评估器"""
-    
-    def __init__(self):
-        self.weights = {
-            'length_efficiency': 0.3,
-            'smoothness': 0.3,
-            'backbone_usage': 0.4
-        }
-    
-    def evaluate_path(self, path):
-        """评估路径质量"""
-        if not path or len(path) < 2:
-            return 0
-        
-        # 长度效率
-        length_score = self._evaluate_length_efficiency(path)
-        
-        # 平滑度
-        smoothness_score = self._evaluate_smoothness(path)
-        
-        # 骨干网络使用（简化）
-        backbone_score = 0.5  # 默认值
-        
-        # 综合评分
-        total_score = (
-            length_score * self.weights['length_efficiency'] +
-            smoothness_score * self.weights['smoothness'] +
-            backbone_score * self.weights['backbone_usage']
-        )
-        
-        return min(1.0, max(0.0, total_score))
-    
-    def _evaluate_length_efficiency(self, path):
-        """评估长度效率"""
-        actual_length = self._calculate_path_length(path)
-        direct_distance = math.sqrt(
-            (path[-1][0] - path[0][0])**2 + 
-            (path[-1][1] - path[0][1])**2
-        )
-        
-        if direct_distance < 0.1:
-            return 1.0
-        
-        efficiency = direct_distance / (actual_length + 0.1)
-        return min(1.0, efficiency)
-    
-    def _evaluate_smoothness(self, path):
-        """评估路径平滑度"""
-        if len(path) < 3:
-            return 1.0
-        
-        total_angle_change = 0
-        for i in range(1, len(path) - 1):
-            angle_change = self._calculate_angle_change(path[i-1], path[i], path[i+1])
-            total_angle_change += angle_change
-        
-        # 归一化
-        avg_angle_change = total_angle_change / max(1, len(path) - 2)
-        smoothness = math.exp(-avg_angle_change)
-        
-        return min(1.0, smoothness)
-    
-    def _calculate_angle_change(self, p1, p2, p3):
-        """计算角度变化"""
-        v1 = [p2[0] - p1[0], p2[1] - p1[1]]
-        v2 = [p3[0] - p2[0], p3[1] - p2[1]]
-        
-        len1 = math.sqrt(v1[0]**2 + v1[1]**2)
-        len2 = math.sqrt(v2[0]**2 + v2[1]**2)
-        
-        if len1 < 0.001 or len2 < 0.001:
-            return 0
-        
-        cos_angle = (v1[0]*v2[0] + v1[1]*v2[1]) / (len1 * len2)
-        cos_angle = max(-1, min(1, cos_angle))
-        
-        return math.acos(cos_angle)
-    
-    def _calculate_path_length(self, path):
-        """计算路径长度"""
-        if not path or len(path) < 2:
-            return 0
-        
-        length = 0
-        for i in range(len(path) - 1):
-            dx = path[i+1][0] - path[i][0]
-            dy = path[i+1][1] - path[i][1]
-            length += math.sqrt(dx*dx + dy*dy)
-        
-        return length
+# 保持向后兼容性
+VehicleScheduler = SimplifiedVehicleScheduler
+ECBSVehicleScheduler = SimplifiedECBSVehicleScheduler
