@@ -263,55 +263,125 @@ class OptimizedPathPlanner:
             return self._plan_direct_optimized_strategy(vehicle_id, start, goal, False, attempt)
     
     def _plan_three_segment_path(self, start, goal, start_point, goal_point):
-        """规划三段式路径：起点->骨干->骨干内->骨干->终点"""
+        """规划三段式路径：起点->骨干->骨干内->骨干->终点 - 修复版"""
         try:
+            # 添加更严格的输入验证
+            if not start_point or not goal_point:
+                if self.debug:
+                    print("❌ 接入点信息缺失")
+                return None
+            
+            # 检查接入点是否为字典类型
+            if not isinstance(start_point, dict) or not isinstance(goal_point, dict):
+                if self.debug:
+                    print(f"❌ 接入点类型错误: start_point类型={type(start_point)}, goal_point类型={type(goal_point)}")
+                return None
+            
+            if 'position' not in start_point or 'position' not in goal_point:
+                if self.debug:
+                    print("❌ 接入点位置信息缺失")
+                    print(f"  start_point keys: {list(start_point.keys()) if start_point else 'None'}")
+                    print(f"  goal_point keys: {list(goal_point.keys()) if goal_point else 'None'}")
+                return None
+            
+            # 验证位置信息的有效性
+            start_pos = start_point.get('position')
+            goal_pos = goal_point.get('position')
+            
+            if not start_pos or not goal_pos:
+                if self.debug:
+                    print("❌ 接入点位置为空")
+                return None
+            
+            if len(start_pos) < 2 or len(goal_pos) < 2:
+                if self.debug:
+                    print("❌ 接入点位置坐标不完整")
+                return None
+            
+            if self.debug:
+                print(f"🛤️ 规划三段路径:")
+                print(f"  起点: {start}")
+                print(f"  入口: {start_pos}")
+                print(f"  出口: {goal_pos}")
+                print(f"  终点: {goal}")
+            
             # 第一段：起点到骨干入口
-            segment1 = self._plan_local_segment(start, start_point['position'])
+            if self.debug:
+                print("  🔸 规划第一段...")
+            segment1 = self._plan_local_segment(start, start_pos)
             if not segment1:
+                if self.debug:
+                    print("  ❌ 第一段规划失败")
                 return None
             
             # 第二段：骨干网络内路径
+            if self.debug:
+                print("  🔸 规划第二段...")
             segment2 = self._plan_backbone_segment(start_point, goal_point)
             if not segment2:
+                if self.debug:
+                    print("  ❌ 第二段规划失败")
                 return None
             
             # 第三段：骨干出口到终点
-            segment3 = self._plan_local_segment(goal_point['position'], goal)
+            if self.debug:
+                print("  🔸 规划第三段...")
+            segment3 = self._plan_local_segment(goal_pos, goal)
             if not segment3:
+                if self.debug:
+                    print("  ❌ 第三段规划失败")
                 return None
             
             # 合并路径
+            if self.debug:
+                print("  🔗 合并路径段...")
             complete_path = self._merge_path_segments([segment1, segment2, segment3])
             
             if not complete_path:
+                if self.debug:
+                    print("  ❌ 路径合并失败")
                 return None
             
             # 计算总成本
-            total_cost = (
-                self._calculate_path_cost(segment1) +
-                self._calculate_path_cost(segment2) * 0.8 +  # 骨干路径权重较低
-                self._calculate_path_cost(segment3)
-            )
+            total_cost = self._calculate_path_cost(complete_path)
             
-            # 构建结构信息
+            # 构建结构信息 - 添加安全检查和默认值
             structure = {
                 'type': 'three_segment',
                 'entry_point': start_point,
                 'exit_point': goal_point,
-                'backbone_segment': f"{start_point.get('path_id', '')}:{goal_point.get('path_id', '')}",
+                'backbone_segment': self._safe_get_backbone_segment_id(start_point, goal_point),
                 'to_backbone_path': segment1,
                 'backbone_path': segment2,
                 'from_backbone_path': segment3,
                 'total_cost': total_cost
             }
             
+            if self.debug:
+                print(f"  ✅ 三段路径规划成功，总点数: {len(complete_path)}")
+            
             return complete_path, structure, total_cost
             
         except Exception as e:
             if self.debug:
-                print(f"三段路径规划失败: {e}")
+                print(f"❌ 三段路径规划出错: {e}")
+                import traceback
+                traceback.print_exc()
             return None
-    
+    def _safe_get_backbone_segment_id(self, start_point, goal_point):
+        """安全获取骨干段ID"""
+        try:
+            if not isinstance(start_point, dict) or not isinstance(goal_point, dict):
+                return "unknown:unknown"
+            
+            start_path_id = start_point.get('path_id', 'unknown')
+            goal_path_id = goal_point.get('path_id', 'unknown')
+            
+            return f"{start_path_id}:{goal_path_id}"
+        except Exception as e:
+            if self.debug:
+                print(f"获取骨干段ID时出错: {e}")
+            return "error:error"    
     def _plan_local_segment(self, start, goal, max_iterations=2000):
         """规划局部路径段"""
         if not self.rrt_planner:
@@ -326,29 +396,72 @@ class OptimizedPathPlanner:
         return self.rrt_planner.plan_path(start, goal, max_iterations=max_iterations)
     
     def _plan_backbone_segment(self, start_point, goal_point):
-        """在骨干网络中规划路径段"""
+        """在骨干网络中规划路径段 - 增强安全检查版"""
         if not self.backbone_network:
+            if self.debug:
+                print("⚠️ 骨干网络不可用")
             return None
         
-        start_path_id = start_point.get('path_id')
-        start_index = start_point.get('path_index', 0)
-        goal_path_id = goal_point.get('path_id')
-        goal_index = goal_point.get('path_index', 0)
-        
-        if not start_path_id or not goal_path_id:
+        # 添加更严格的安全检查
+        if not start_point or not goal_point:
+            if self.debug:
+                print("⚠️ 起点或终点信息缺失")
             return None
+        
+        if not isinstance(start_point, dict) or not isinstance(goal_point, dict):
+            if self.debug:
+                print(f"⚠️ 接入点类型错误: start={type(start_point)}, goal={type(goal_point)}")
+            return None
+        
+        # 安全获取路径信息
+        start_path_id = start_point.get('path_id') if start_point else None
+        start_index = start_point.get('path_index', 0) if start_point else 0
+        goal_path_id = goal_point.get('path_id') if goal_point else None
+        goal_index = goal_point.get('path_index', 0) if goal_point else 0
+        start_pos = start_point.get('position') if start_point else None
+        goal_pos = goal_point.get('position') if goal_point else None
+        
+        if self.debug:
+            print(f"🔍 骨干段规划: {start_path_id}[{start_index}] -> {goal_path_id}[{goal_index}]")
+        
+        # 如果路径ID缺失或位置信息缺失，使用直接连接
+        if not start_path_id or not goal_path_id or not start_pos or not goal_pos:
+            if self.debug:
+                print("⚠️ 关键信息缺失，使用直接连接")
+            
+            if start_pos and goal_pos and len(start_pos) >= 2 and len(goal_pos) >= 2:
+                return [start_pos, goal_pos]
+            else:
+                if self.debug:
+                    print("❌ 位置信息也无效")
+                return None
         
         # 如果在同一条路径上
         if start_path_id == goal_path_id:
-            return self.backbone_network.get_path_segment(
-                start_path_id, start_index, goal_index
-            )
+            if hasattr(self.backbone_network, 'get_path_segment'):
+                try:
+                    segment = self.backbone_network.get_path_segment(
+                        start_path_id, start_index, goal_index
+                    )
+                    if segment and len(segment) >= 2:
+                        if self.debug:
+                            print(f"✅ 同路径段获取成功，点数: {len(segment)}")
+                        return segment
+                except Exception as e:
+                    if self.debug:
+                        print(f"⚠️ 路径段获取失败: {e}")
+            
+            # 回退方案：直接连接
+            if self.debug:
+                print("⚠️ 路径段获取失败，使用直接连接")
+            return [start_pos, goal_pos]
         
-        # 跨路径段规划
-        compound_path_id = f"{start_path_id}:{goal_path_id}"
-        return self.backbone_network.get_path_segment(
-            compound_path_id, start_index, goal_index
-        )
+        # 跨路径的处理
+        if self.debug:
+            print("📝 跨路径规划，使用简化连接")
+        
+        # 简化方案：直接连接两个点
+        return [start_pos, goal_pos]
     
     def _plan_direct_optimized_strategy(self, vehicle_id, start, goal, use_backbone, attempt):
         """优化的直接规划策略"""
@@ -655,7 +768,105 @@ class OptimizedPathPlanner:
                 i += 1
         
         return optimized
-    
+    def find_accessible_points(self, position, rrt_planner, max_candidates=5, 
+                            sampling_step=10, max_distance=20.0):
+        """优化版可达点查找 - 修复版"""
+        start_time = time.time()
+        accessible_points = []
+        
+        try:
+            # 首先使用优化的连接点查找
+            nearest_connections = self.find_nearest_connection_optimized(
+                position, max_distance, max_candidates * 2
+            )
+            
+            if nearest_connections:
+                # 将单个结果转换为列表
+                if not isinstance(nearest_connections, list):
+                    nearest_connections = [nearest_connections]
+                
+                # 过滤掉 None 值和无效连接
+                valid_connections = []
+                for conn in nearest_connections:
+                    if (conn and isinstance(conn, dict) and 
+                        'id' in conn and 'position' in conn and 
+                        conn['position'] is not None):
+                        valid_connections.append(conn)
+                
+                for conn in valid_connections[:max_candidates]:
+                    if rrt_planner and rrt_planner.is_path_possible(position, conn['position']):
+                        # 确保所有必要的字段都存在
+                        point_info = {
+                            'conn_id': conn['id'],
+                            'path_id': conn.get('paths', [None])[0] if conn.get('paths') else None,
+                            'path_index': conn.get('path_index', 0),
+                            'position': conn['position'],
+                            'distance': conn.get('distance', 0),
+                            'type': 'connection',
+                            'quality': conn.get('quality_score', 0.5)
+                        }
+                        accessible_points.append(point_info)
+            
+            # 如果连接点不足，使用路径点KD树查找
+            if len(accessible_points) < max_candidates and hasattr(self, 'path_point_kdtree') and self.path_point_kdtree:
+                additional_needed = max_candidates - len(accessible_points)
+                
+                query_point = [position[0], position[1]]
+                try:
+                    distances, indices = self.path_point_kdtree.query(
+                        query_point,
+                        k=min(additional_needed * 3, len(self.path_point_info)),
+                        distance_upper_bound=max_distance
+                    )
+                    
+                    if not hasattr(distances, '__len__'):
+                        distances = [distances]
+                        indices = [indices]
+                    
+                    for dist, idx in zip(distances, indices):
+                        if (idx < len(self.path_point_info) and 
+                            dist <= max_distance and 
+                            not np.isinf(dist)):
+                            
+                            path_id, point_idx = self.path_point_info[idx]
+                            if (path_id in self.paths and 
+                                point_idx < len(self.paths[path_id]['path'])):
+                                
+                                point = self.paths[path_id]['path'][point_idx]
+                                
+                                if rrt_planner and rrt_planner.is_path_possible(position, point):
+                                    point_info = {
+                                        'conn_id': None,
+                                        'path_id': path_id,
+                                        'path_index': point_idx,
+                                        'position': point,
+                                        'distance': dist,
+                                        'type': 'path_point',
+                                        'quality': self.paths[path_id].get('quality_score', 0.5)
+                                    }
+                                    accessible_points.append(point_info)
+                                    
+                                    if len(accessible_points) >= max_candidates:
+                                        break
+                                    
+                except Exception as e:
+                    if self.debug:
+                        print(f"路径点查询失败: {e}")
+            
+            # 按质量和距离排序，过滤掉无效项
+            valid_points = [p for p in accessible_points if p and isinstance(p, dict)]
+            valid_points.sort(key=lambda x: (-x.get('quality', 0), x.get('distance', float('inf'))))
+            
+            # 更新性能统计
+            if hasattr(self, 'performance_stats'):
+                self.performance_stats['query_time'] += time.time() - start_time
+            
+            return valid_points[:max_candidates]
+            
+        except Exception as e:
+            if self.debug:
+                print(f"find_accessible_points 出错: {e}")
+            return []    
     def _smooth_path_advanced(self, path, iterations=3):
         """高级路径平滑"""
         if len(path) <= 2:

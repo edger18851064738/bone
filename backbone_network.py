@@ -305,9 +305,11 @@ class OptimizedBackbonePathNetwork:
                 }
     
     def _build_spatial_indexes(self):
-        """构建优化的空间索引系统"""
+        """构建优化的空间索引系统 - 修复版"""
         try:
             if not self.connections:
+                if self.debug:
+                    print("❌ 没有连接点可建立索引")
                 return
             
             # 构建连接点KD树
@@ -315,9 +317,12 @@ class OptimizedBackbonePathNetwork:
             connection_ids = []
             
             for conn_id, conn_data in self.connections.items():
-                if 'position' in conn_data:
+                if (conn_data and 'position' in conn_data and 
+                    conn_data['position'] is not None and 
+                    len(conn_data['position']) >= 2):
+                    
                     pos = conn_data['position']
-                    connection_points.append([pos[0], pos[1]])
+                    connection_points.append([float(pos[0]), float(pos[1])])
                     connection_ids.append(conn_id)
             
             if connection_points:
@@ -335,16 +340,33 @@ class OptimizedBackbonePathNetwork:
                 self.connection_ids = connection_ids
                 # 保持向后兼容
                 self.connection_kdtree = self.advanced_spatial_index['connection_kdtree']
+                
+                if self.debug:
+                    print(f"✅ 连接点KD树构建完成，{len(connection_points)}个点")
+            else:
+                if self.debug:
+                    print("❌ 没有有效的连接点位置")
             
             # 构建路径点KD树
             path_points = []
             path_info = []
             
             for path_id, path_data in self.paths.items():
+                if not path_data or 'path' not in path_data:
+                    continue
+                    
                 path = path_data['path']
-                for i, point in enumerate(path[::5]):  # 每5个点采样一个
-                    path_points.append([point[0], point[1]])
-                    path_info.append((path_id, i * 5))
+                if not path:
+                    continue
+                    
+                # 每5个点采样一个，避免索引过大
+                for i, point in enumerate(path[::5]):
+                    if point and len(point) >= 2:
+                        try:
+                            path_points.append([float(point[0]), float(point[1])])
+                            path_info.append((path_id, i * 5))
+                        except (ValueError, TypeError):
+                            continue
             
             if path_points:
                 if CKDTREE_AVAILABLE:
@@ -359,6 +381,9 @@ class OptimizedBackbonePathNetwork:
                 self.path_point_info = path_info
                 # 保持向后兼容
                 self.path_point_kdtree = self.advanced_spatial_index['path_kdtree']
+                
+                if self.debug:
+                    print(f"✅ 路径点KD树构建完成，{len(path_points)}个点")
             
             # 构建网格索引
             self._build_grid_index()
@@ -366,12 +391,22 @@ class OptimizedBackbonePathNetwork:
             self.advanced_spatial_index['dirty'] = False
             self.spatial_index_dirty = False
             
-            print("高级空间索引构建完成")
+            print("✅ 高级空间索引构建完成")
             
         except Exception as e:
-            print(f"构建空间索引失败: {e}")
+            print(f"❌ 构建空间索引失败: {e}")
+            if self.debug:
+                import traceback
+                traceback.print_exc()
             self._build_simple_spatial_index()
-    
+    # 添加调试属性
+    @property 
+    def debug(self):
+        return getattr(self, '_debug', False)
+
+    @debug.setter
+    def debug(self, value):
+        self._debug = value
     def _build_grid_index(self):
         """构建网格索引用于快速区域查询"""
         grid_size = 20.0
@@ -399,8 +434,14 @@ class OptimizedBackbonePathNetwork:
                 self.advanced_spatial_index['grid_index'][grid_key]['paths'].add(path_id)
     
     def find_nearest_connection_optimized(self, position, max_distance=5.0, max_candidates=5):
-        """超级优化的最近连接点查找"""
+        """超级优化的最近连接点查找 - 修复版"""
         start_time = time.time()
+        
+        # 输入验证
+        if not position or len(position) < 2:
+            if self.debug:
+                print("❌ 位置信息无效")
+            return None
         
         # 检查缓存
         cache_key = f"conn_{position[0]:.1f}_{position[1]:.1f}_{max_distance}"
@@ -413,21 +454,39 @@ class OptimizedBackbonePathNetwork:
         self.performance_stats['cache_misses'] += 1
         
         # 重建索引（如果需要）
-        if self.advanced_spatial_index['dirty']:
+        if self.advanced_spatial_index.get('dirty', True):
             self._build_spatial_indexes()
         
         result = None
         
         try:
             # 使用KD树查找
-            if self.advanced_spatial_index['connection_kdtree'] is not None:
+            if self.advanced_spatial_index.get('connection_kdtree') is not None:
                 result = self._kdtree_nearest_connection(position, max_distance, max_candidates)
             else:
                 # 回退到网格查找
                 result = self._grid_nearest_connection(position, max_distance, max_candidates)
         except Exception as e:
-            print(f"优化查找失败，使用简单方法: {e}")
+            if self.debug:
+                print(f"优化查找失败，使用简单方法: {e}")
             result = self._simple_nearest_connection(position, max_distance)
+        
+        # 验证结果的有效性
+        if result and isinstance(result, dict):
+            # 确保所有必要字段都存在
+            if not all(key in result for key in ['id', 'position']):
+                if self.debug:
+                    print("❌ 查找结果缺少必要字段")
+                result = None
+        elif result and isinstance(result, list):
+            # 过滤掉无效的结果
+            valid_results = []
+            for item in result:
+                if (item and isinstance(item, dict) and 
+                    'id' in item and 'position' in item and 
+                    item['position'] is not None):
+                    valid_results.append(item)
+            result = valid_results[0] if valid_results else None
         
         # 缓存结果
         if result:
@@ -440,10 +499,17 @@ class OptimizedBackbonePathNetwork:
         return result
     
     def _kdtree_nearest_connection(self, position, max_distance, max_candidates):
-        """使用KD树查找最近连接点"""
-        kdtree = self.advanced_spatial_index['connection_kdtree']
+        """使用KD树查找最近连接点 - 修复版"""
+        kdtree = self.advanced_spatial_index.get('connection_kdtree')
         
         if not kdtree or not hasattr(self, 'connection_ids'):
+            if self.debug:
+                print("❌ KD树或连接点ID列表不可用")
+            return None
+        
+        if not self.connection_ids:
+            if self.debug:
+                print("❌ 连接点ID列表为空")
             return None
         
         query_point = [position[0], position[1]]
@@ -463,20 +529,39 @@ class OptimizedBackbonePathNetwork:
             best_connections = []
             
             for dist, idx in zip(distances, indices):
-                if idx >= len(self.connection_ids) or dist > max_distance:
+                # 检查索引和距离的有效性
+                if (idx >= len(self.connection_ids) or 
+                    dist > max_distance or 
+                    np.isinf(dist) or 
+                    np.isnan(dist)):
                     continue
                 
                 conn_id = self.connection_ids[idx]
-                if conn_id in self.connections:
-                    conn_data = self.connections[conn_id].copy()
-                    conn_data['id'] = conn_id
-                    conn_data['distance'] = dist
-                    
-                    # 计算综合评分
-                    score = self._calculate_connection_score(conn_data, dist)
-                    conn_data['score'] = score
-                    
-                    best_connections.append(conn_data)
+                if conn_id not in self.connections:
+                    continue
+                
+                conn_data = self.connections[conn_id]
+                if not conn_data or 'position' not in conn_data:
+                    continue
+                
+                # 创建安全的连接点信息
+                safe_conn_data = {
+                    'id': conn_id,
+                    'position': conn_data['position'],
+                    'distance': float(dist),
+                    'type': conn_data.get('type', 'unknown'),
+                    'paths': conn_data.get('paths', []),
+                    'path_index': conn_data.get('path_index', 0),
+                    'priority': conn_data.get('priority', 1),
+                    'capacity': conn_data.get('capacity', 1),
+                    'quality_score': conn_data.get('quality_score', 0.5)
+                }
+                
+                # 计算综合评分
+                score = self._calculate_connection_score(safe_conn_data, dist)
+                safe_conn_data['score'] = score
+                
+                best_connections.append(safe_conn_data)
             
             # 按评分排序
             best_connections.sort(key=lambda x: -x.get('score', 0))
@@ -484,85 +569,109 @@ class OptimizedBackbonePathNetwork:
             return best_connections[0] if best_connections else None
             
         except Exception as e:
-            print(f"KD树查询失败: {e}")
+            if self.debug:
+                print(f"KD树查询失败: {e}")
             return None
     
     def find_accessible_points(self, position, rrt_planner, max_candidates=5, 
-                              sampling_step=10, max_distance=20.0):
-        """优化版可达点查找"""
+                            sampling_step=10, max_distance=20.0):
+        """优化版可达点查找 - 修复版"""
         start_time = time.time()
         accessible_points = []
         
-        # 首先使用优化的连接点查找
-        nearest_connections = self.find_nearest_connection_optimized(
-            position, max_distance, max_candidates * 2
-        )
-        
-        if nearest_connections:
-            # 将单个结果转换为列表
-            if not isinstance(nearest_connections, list):
-                nearest_connections = [nearest_connections]
+        try:
+            # 首先使用优化的连接点查找
+            nearest_connections = self.find_nearest_connection_optimized(
+                position, max_distance, max_candidates * 2
+            )
             
-            for conn in nearest_connections[:max_candidates]:
-                if rrt_planner and rrt_planner.is_path_possible(position, conn['position']):
-                    accessible_points.append({
-                        'conn_id': conn['id'],
-                        'path_id': conn.get('paths', [None])[0],
-                        'path_index': conn.get('path_index', 0),
-                        'position': conn['position'],
-                        'distance': conn['distance'],
-                        'type': 'connection',
-                        'quality': conn.get('quality_score', 0.5)
-                    })
-        
-        # 如果连接点不足，使用路径点KD树查找
-        if len(accessible_points) < max_candidates and self.path_point_kdtree:
-            additional_needed = max_candidates - len(accessible_points)
+            if nearest_connections:
+                # 将单个结果转换为列表
+                if not isinstance(nearest_connections, list):
+                    nearest_connections = [nearest_connections]
+                
+                # 过滤掉 None 值和无效连接
+                valid_connections = []
+                for conn in nearest_connections:
+                    if (conn and isinstance(conn, dict) and 
+                        'id' in conn and 'position' in conn and 
+                        conn['position'] is not None):
+                        valid_connections.append(conn)
+                
+                for conn in valid_connections[:max_candidates]:
+                    if rrt_planner and rrt_planner.is_path_possible(position, conn['position']):
+                        # 确保所有必要的字段都存在
+                        point_info = {
+                            'conn_id': conn['id'],
+                            'path_id': conn.get('paths', [None])[0] if conn.get('paths') else None,
+                            'path_index': conn.get('path_index', 0),
+                            'position': conn['position'],
+                            'distance': conn.get('distance', 0),
+                            'type': 'connection',
+                            'quality': conn.get('quality_score', 0.5)
+                        }
+                        accessible_points.append(point_info)
             
-            query_point = [position[0], position[1]]
-            try:
-                distances, indices = self.path_point_kdtree.query(
-                    query_point,
-                    k=min(additional_needed * 3, len(self.path_point_info)),
-                    distance_upper_bound=max_distance
-                )
+            # 如果连接点不足，使用路径点KD树查找
+            if len(accessible_points) < max_candidates and hasattr(self, 'path_point_kdtree') and self.path_point_kdtree:
+                additional_needed = max_candidates - len(accessible_points)
                 
-                if not hasattr(distances, '__len__'):
-                    distances = [distances]
-                    indices = [indices]
-                
-                for dist, idx in zip(distances, indices):
-                    if idx >= len(self.path_point_info) or dist > max_distance:
-                        continue
+                query_point = [position[0], position[1]]
+                try:
+                    distances, indices = self.path_point_kdtree.query(
+                        query_point,
+                        k=min(additional_needed * 3, len(self.path_point_info)),
+                        distance_upper_bound=max_distance
+                    )
                     
-                    path_id, point_idx = self.path_point_info[idx]
-                    if path_id not in self.paths:
-                        continue
+                    if not hasattr(distances, '__len__'):
+                        distances = [distances]
+                        indices = [indices]
                     
-                    point = self.paths[path_id]['path'][point_idx]
-                    
-                    if rrt_planner and rrt_planner.is_path_possible(position, point):
-                        accessible_points.append({
-                            'conn_id': None,
-                            'path_id': path_id,
-                            'path_index': point_idx,
-                            'position': point,
-                            'distance': dist,
-                            'type': 'path_point',
-                            'quality': self.paths[path_id].get('quality_score', 0.5)
-                        })
-                        
-                        if len(accessible_points) >= max_candidates:
-                            break
+                    for dist, idx in zip(distances, indices):
+                        if (idx < len(self.path_point_info) and 
+                            dist <= max_distance and 
+                            not np.isinf(dist)):
                             
-            except Exception as e:
-                print(f"路径点查询失败: {e}")
-        
-        # 按质量和距离排序
-        accessible_points.sort(key=lambda x: (-x['quality'], x['distance']))
-        
-        self.performance_stats['query_time'] += time.time() - start_time
-        return accessible_points[:max_candidates]
+                            path_id, point_idx = self.path_point_info[idx]
+                            if (path_id in self.paths and 
+                                point_idx < len(self.paths[path_id]['path'])):
+                                
+                                point = self.paths[path_id]['path'][point_idx]
+                                
+                                if rrt_planner and rrt_planner.is_path_possible(position, point):
+                                    point_info = {
+                                        'conn_id': None,
+                                        'path_id': path_id,
+                                        'path_index': point_idx,
+                                        'position': point,
+                                        'distance': dist,
+                                        'type': 'path_point',
+                                        'quality': self.paths[path_id].get('quality_score', 0.5)
+                                    }
+                                    accessible_points.append(point_info)
+                                    
+                                    if len(accessible_points) >= max_candidates:
+                                        break
+                                    
+                except Exception as e:
+                    if self.debug:
+                        print(f"路径点查询失败: {e}")
+            
+            # 按质量和距离排序，过滤掉无效项
+            valid_points = [p for p in accessible_points if p and isinstance(p, dict)]
+            valid_points.sort(key=lambda x: (-x.get('quality', 0), x.get('distance', float('inf'))))
+            
+            # 更新性能统计
+            if hasattr(self, 'performance_stats'):
+                self.performance_stats['query_time'] += time.time() - start_time
+            
+            return valid_points[:max_candidates]
+            
+        except Exception as e:
+            if self.debug:
+                print(f"find_accessible_points 出错: {e}")
+            return []
     
     def analyze_network_topology(self):
         """分析网络拓扑结构"""
@@ -978,25 +1087,46 @@ class OptimizedBackbonePathNetwork:
             }
         }
     
-    # 简化实现的辅助方法
     def _simple_nearest_connection(self, position, max_distance):
-        """简单的最近连接点查找"""
+        """简单的最近连接点查找 - 修复版"""
+        if not self.connections:
+            return None
+        
         best_connection = None
         best_distance = float('inf')
         
         for conn_id, conn_data in self.connections.items():
-            if 'position' not in conn_data:
-                continue
+            try:
+                if not conn_data or 'position' not in conn_data:
+                    continue
                 
-            dist = self._calculate_distance(position, conn_data['position'])
-            
-            if dist <= max_distance and dist < best_distance:
-                best_distance = dist
-                best_connection = conn_data.copy()
-                best_connection['id'] = conn_id
-                best_connection['distance'] = dist
+                conn_position = conn_data['position']
+                if not conn_position or len(conn_position) < 2:
+                    continue
+                    
+                dist = self._calculate_distance(position, conn_position)
+                
+                if dist <= max_distance and dist < best_distance:
+                    best_distance = dist
+                    # 创建安全的连接点信息
+                    best_connection = {
+                        'id': conn_id,
+                        'position': conn_position,
+                        'distance': float(dist),
+                        'type': conn_data.get('type', 'unknown'),
+                        'paths': conn_data.get('paths', []),
+                        'path_index': conn_data.get('path_index', 0),
+                        'priority': conn_data.get('priority', 1),
+                        'capacity': conn_data.get('capacity', 1),
+                        'quality_score': conn_data.get('quality_score', 0.5)
+                    }
+            except Exception as e:
+                if self.debug:
+                    print(f"处理连接点 {conn_id} 时出错: {e}")
+                continue
         
         return best_connection
+
     
     def _build_simple_spatial_index(self):
         """简单的空间索引实现"""
@@ -1233,7 +1363,41 @@ class OptimizedBackbonePathNetwork:
             'quality_breakdown': {},
             'bottlenecks': []
         }
-
+    def get_path_segment(self, path_id, start_index, end_index):
+        """获取路径段 - 修复版"""
+        try:
+            # 检查路径是否存在
+            if path_id not in self.paths:
+                print(f"⚠️ 路径ID {path_id} 不存在于骨干网络中")
+                return None
+            
+            path_data = self.paths[path_id]
+            if not path_data or 'path' not in path_data:
+                print(f"⚠️ 路径 {path_id} 数据无效")
+                return None
+            
+            path = path_data['path']
+            if not path or len(path) == 0:
+                print(f"⚠️ 路径 {path_id} 为空")
+                return None
+            
+            # 修正索引范围
+            max_index = len(path) - 1
+            start_index = max(0, min(start_index, max_index))
+            end_index = max(start_index, min(end_index, max_index))
+            
+            # 确保有效的段
+            if start_index == end_index:
+                return [path[start_index]]
+            elif start_index < end_index:
+                return path[start_index:end_index + 1]
+            else:
+                # 如果索引顺序颠倒，反转
+                return path[end_index:start_index + 1][::-1]
+                
+        except Exception as e:
+            print(f"❌ get_path_segment 出错: {e}")
+            return None
 
 # 保持向后兼容性的类别名
 BackbonePathNetwork = OptimizedBackbonePathNetwork
