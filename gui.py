@@ -278,14 +278,17 @@ class MineGraphicsScene(QGraphicsScene):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.env = None
+        self.backbone_network = None
         self.show_trajectories = True
         self.show_backbone = True
+        self.show_interfaces = True  # 新增接口显示开关
         
         # 图形项容器
         self.obstacle_items = []
         self.vehicle_items = {}
         self.path_items = {}
         self.backbone_visualizer = None
+        self.interface_items = {}  # 接口图形项
         
         self.setSceneRect(0, 0, 500, 500)
     
@@ -477,14 +480,39 @@ class MineGraphicsScene(QGraphicsScene):
                 self.path_items[vehicle_id] = path_item
     
     def set_backbone_network(self, backbone_network):
-        """设置骨干路径网络"""
+        """设置骨干路径网络并显示接口"""
+        self.backbone_network = backbone_network
+        
         if self.backbone_visualizer:
             self.removeItem(self.backbone_visualizer)
         
         if backbone_network and self.show_backbone:
             self.backbone_visualizer = BackbonePathVisualizer(backbone_network)
             self.addItem(self.backbone_visualizer)
-    
+        
+        # 显示接口点
+        self.update_interface_display()
+    def update_interface_display(self):
+        """更新接口显示"""
+        # 清除现有接口项
+        for item in self.interface_items.values():
+            self.removeItem(item)
+        self.interface_items.clear()
+        
+        if (not self.show_interfaces or not self.backbone_network or 
+            not hasattr(self.backbone_network, 'backbone_interfaces')):
+            return
+        
+        # 添加接口项
+        for interface_id, interface in self.backbone_network.backbone_interfaces.items():
+            interface_item = InterfaceGraphicsItem(interface)
+            self.addItem(interface_item)
+            self.interface_items[interface_id] = interface_item    
+    def set_show_interfaces(self, show):
+        """设置是否显示接口"""
+        self.show_interfaces = show
+        self.update_interface_display()
+
     def set_show_trajectories(self, show):
         """设置是否显示轨迹"""
         self.show_trajectories = show
@@ -617,7 +645,7 @@ class VehicleInfoPanel(QWidget):
             self.update_vehicle_info(0)
     
     def update_vehicle_info(self, index=None):
-        """更新车辆信息显示"""
+        """更新车辆信息显示 - 包含接口信息"""
         if not hasattr(self, 'env') or not self.env:
             return
         
@@ -661,7 +689,8 @@ class VehicleInfoPanel(QWidget):
         
         path_type = path_structure.get('type', 'unknown')
         type_map = {
-            'backbone_assisted': '骨干辅助',
+            'interface_assisted': '接口辅助',
+            'backbone_only': '骨干直接',
             'direct': '直接路径',
             'conflict_resolved': '冲突解决'
         }
@@ -670,6 +699,33 @@ class VehicleInfoPanel(QWidget):
         backbone_util = path_structure.get('backbone_utilization', 0)
         self.path_labels["骨干利用率:"].setText(f"{backbone_util:.1%}")
         
+        # 动态添加接口信息标签（如果还没有的话）
+        if "使用接口:" not in self.path_labels:
+            # 创建新的标签
+            interface_label = QLabel("--")
+            interface_label.setStyleSheet("background-color: #f8f9fa; padding: 3px; border-radius: 3px;")
+            self.path_labels["使用接口:"] = interface_label
+            
+            # 添加到布局
+            layout = self.path_group.layout()
+            row_count = layout.rowCount()
+            layout.addWidget(QLabel("使用接口:"), row_count, 0)
+            layout.addWidget(interface_label, row_count, 1)
+        
+        # 显示接口信息
+        interface_id = path_structure.get('interface_id', 'N/A')
+        if interface_id and interface_id != 'N/A':
+            # 如果接口ID太长，只显示后面部分
+            if len(str(interface_id)) > 15:
+                display_interface = str(interface_id).split('_')[-1]
+            else:
+                display_interface = str(interface_id)
+        else:
+            display_interface = "N/A"
+        
+        self.path_labels["使用接口:"].setText(display_interface)
+        
+        # 如果使用了接口，还可以显示更多信息
         if self.scheduler and v_id in self.scheduler.vehicle_statuses:
             task_id = self.scheduler.vehicle_statuses[v_id].get('current_task')
             if task_id and task_id in self.scheduler.tasks:
@@ -806,7 +862,9 @@ class ControlPanel(QWidget):
         self.show_backbone_cb.setChecked(True)
         self.show_paths_cb = QCheckBox("显示车辆路径")
         self.show_paths_cb.setChecked(True)
-        
+        self.show_interfaces_cb = QCheckBox("显示骨干接口")
+        self.show_interfaces_cb.setChecked(True)
+        display_layout.addWidget(self.show_interfaces_cb)        
         display_layout.addWidget(self.show_backbone_cb)
         display_layout.addWidget(self.show_paths_cb)
         
@@ -831,7 +889,7 @@ class ControlPanel(QWidget):
         self.speed_slider.valueChanged.connect(main_window.update_simulation_speed)
         self.show_backbone_cb.stateChanged.connect(main_window.toggle_backbone_display)
         self.show_paths_cb.stateChanged.connect(main_window.toggle_path_display)
-
+        self.show_interfaces_cb.stateChanged.connect(main_window.toggle_interface_display)
 class OptimizedMineGUI(QMainWindow):
     """优化的露天矿多车协同调度系统GUI"""
     
@@ -1124,10 +1182,24 @@ class OptimizedMineGUI(QMainWindow):
             
             if success:
                 # 更新到其他组件
+                self.backbone_network.debug_network_status()
                 self.path_planner.set_backbone_network(self.backbone_network)
                 self.traffic_manager.set_backbone_network(self.backbone_network)
                 self.vehicle_scheduler.set_backbone_network(self.backbone_network)
-                
+                if self.env.vehicles:
+                    test_vehicle_id = list(self.env.vehicles.keys())[0]
+                    test_position = self.env.vehicles[test_vehicle_id]['position']
+                    
+                    # 测试到装载点的接口查找
+                    print(f"\n=== 测试车辆 {test_vehicle_id} 的接口查找 ===")
+                    test_interface = self.backbone_network.find_nearest_interface(
+                        test_position, 'loading', 0, debug=True
+                    )
+                    
+                    if test_interface:
+                        print(f"找到测试接口: {test_interface.interface_id}")
+                    else:
+                        print("❌ 测试接口查找失败")                
                 # 在图形视图中显示
                 self.graphics_view.set_backbone_network(self.backbone_network)
                 
@@ -1245,7 +1317,10 @@ class OptimizedMineGUI(QMainWindow):
                 
         except Exception as e:
             self.log(f"显示更新错误: {e}", "error")
-    
+    def toggle_interface_display(self, state):
+        """切换接口显示"""
+        show = state == Qt.Checked
+        self.graphics_view.mine_scene.set_show_interfaces(show)    
     def assign_vehicle_task(self):
         """分配车辆任务"""
         if not self.vehicle_scheduler:
@@ -1442,7 +1517,48 @@ class OptimizedMineGUI(QMainWindow):
     def clear_log(self):
         """清除日志"""
         self.log_text.clear()
-
+class InterfaceGraphicsItem(QGraphicsItemGroup):
+    """接口点图形项"""
+    def __init__(self, interface, parent=None):
+        super().__init__(parent)
+        self.interface = interface
+        self.setZValue(8)
+        
+        self.create_interface_visual()
+    
+    def create_interface_visual(self):
+        """创建接口可视化"""
+        x, y = self.interface.position[0], self.interface.position[1]
+        
+        # 接口圆圈
+        radius = 3
+        if self.interface.is_occupied:
+            color = QColor(255, 100, 100, 180)  # 红色表示占用
+        else:
+            color = QColor(100, 255, 100, 180)  # 绿色表示可用
+        
+        circle = QGraphicsEllipseItem(x - radius, y - radius, radius * 2, radius * 2)
+        circle.setBrush(QBrush(color))
+        circle.setPen(QPen(Qt.black, 0.5))
+        self.addToGroup(circle)
+        
+        # 方向指示箭头
+        arrow_length = 5
+        direction = self.interface.direction
+        end_x = x + arrow_length * math.cos(direction)
+        end_y = y + arrow_length * math.sin(direction)
+        
+        arrow = QGraphicsLineItem(x, y, end_x, end_y)
+        arrow.setPen(QPen(Qt.blue, 1.0))
+        self.addToGroup(arrow)
+        
+        # 接口ID标签（小字体）
+        if hasattr(self.interface, 'interface_id'):
+            label = QGraphicsTextItem(self.interface.interface_id.split('_')[-1])
+            label.setPos(x + 4, y - 2)
+            label.setDefaultTextColor(Qt.black)
+            label.setFont(QFont("Arial", 2))
+            self.addToGroup(label)
 def main():
     """主函数"""
     app = QApplication(sys.argv)

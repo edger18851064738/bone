@@ -233,8 +233,7 @@ class SimplifiedPathPlanner:
     
     def _try_backbone_planning(self, start, goal, attempt):
         """
-        尝试使用骨干网络规划路径
-        按照用户设计理念：查找 -> 选择 -> 接入 -> 拼接
+        尝试使用骨干网络规划路径 - 接口系统优化版
         """
         try:
             # 1. 识别目标点类型
@@ -248,22 +247,23 @@ class SimplifiedPathPlanner:
             if self.debug:
                 print(f"目标识别为: {target_type}_{target_id}")
             
-            # 2. 直接使用骨干网络的完整规划方法
-            complete_path, structure = self.backbone_network.get_path_from_position_to_target(
+            # 2. 使用新的接口系统规划路径
+            complete_path, structure = self.backbone_network.get_path_from_position_to_target_via_interface(
                 start, target_type, target_id
             )
             
             if complete_path and structure:
                 if self.debug:
-                    print(f"骨干网络规划成功: 总长度{len(complete_path)}, "
-                          f"骨干利用率{structure.get('backbone_utilization', 0):.2f}")
+                    print(f"接口系统规划成功: 总长度{len(complete_path)}, "
+                        f"类型{structure.get('type')}, "
+                        f"接口{structure.get('interface_id', 'N/A')}")
                 return complete_path, structure
             
             return None
             
         except Exception as e:
             if self.debug:
-                print(f"骨干网络规划失败: {e}")
+                print(f"接口系统规划失败: {e}")
             return None
     
     def _direct_planning(self, start, goal, attempt):

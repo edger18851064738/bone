@@ -5,78 +5,84 @@ from typing import List, Dict, Tuple, Set, Optional, Any
 from collections import defaultdict
 
 class VehicleTask:
-    """车辆任务类 - 优化版"""
+    """车辆任务类 - 接口系统优化版"""
     
     def __init__(self, task_id, task_type, start, goal, priority=1, 
                  loading_point_id=None, unloading_point_id=None):
         self.task_id = task_id
-        self.task_type = task_type  # 'to_loading', 'to_unloading', 'to_initial'
+        self.task_type = task_type
         self.start = start
         self.goal = goal
         self.priority = priority
-        self.status = 'pending'  # 'pending', 'assigned', 'in_progress', 'completed', 'failed'
+        self.status = 'pending'
         self.assigned_vehicle = None
-        self.progress = 0.0  # 0.0 - 1.0
+        self.progress = 0.0
         self.path = None
         self.estimated_time = 0
         self.start_time = 0
         self.completion_time = 0
         
-        # 装载点和卸载点ID
         self.loading_point_id = loading_point_id
         self.unloading_point_id = unloading_point_id
         
-        # 简化的路径结构信息 - 按照新的设计理念
+        # 接口系统相关字段
         self.path_structure = {
-            'type': 'unknown',  # 'backbone_assisted', 'direct'
+            'type': 'unknown',
             'uses_backbone': False,
+            'interface_id': None,          # 使用的接口ID
             'backbone_path_id': None,
-            'backbone_utilization': 0.0,  # 骨干路径占总路径的比例
-            'access_length': 0,  # 接入路径长度
-            'backbone_length': 0,  # 骨干路径长度
-            'total_length': 0  # 总路径长度
+            'backbone_utilization': 0.0,
+            'access_length': 0,
+            'backbone_length': 0,
+            'total_length': 0
         }
         
-        # 质量评估
+        # 接口预约信息
+        self.reserved_interface = None
+        self.interface_reservation_time = None
+        
         self.quality_score = 0.0
     
-    def to_dict(self):
-        """转换为字典表示"""
-        return {
-            'task_id': self.task_id,
-            'task_type': self.task_type,
-            'start': self.start,
-            'goal': self.goal,
-            'priority': self.priority,
-            'status': self.status,
-            'progress': self.progress,
-            'assigned_vehicle': self.assigned_vehicle,
-            'estimated_time': self.estimated_time,
-            'start_time': self.start_time,
-            'completion_time': self.completion_time,
-            'loading_point_id': self.loading_point_id,
-            'unloading_point_id': self.unloading_point_id,
-            'quality_score': self.quality_score,
-            'backbone_utilization': self.path_structure.get('backbone_utilization', 0.0),
-            'uses_backbone': self.path_structure.get('uses_backbone', False)
-        }
+    def reserve_interface(self, interface_id, backbone_network, duration=60):
+        """预约接口"""
+        if interface_id in backbone_network.backbone_interfaces:
+            interface = backbone_network.backbone_interfaces[interface_id]
+            if interface.is_available():
+                interface.reserve(self.assigned_vehicle, duration)
+                self.reserved_interface = interface_id
+                self.interface_reservation_time = time.time()
+                return True
+        return False
+    
+    def release_interface(self, backbone_network):
+        """释放接口"""
+        if self.reserved_interface and self.reserved_interface in backbone_network.backbone_interfaces:
+            backbone_network.backbone_interfaces[self.reserved_interface].release()
+            self.reserved_interface = None
+            self.interface_reservation_time = None
     
     def update_path_structure(self, structure):
-        """更新路径结构信息 - 简化版"""
+        """更新路径结构信息 - 接口系统版"""
         if not structure:
             return
         
         # 更新基本结构信息
         self.path_structure.update(structure)
         
-        # 计算骨干网络利用率
-        if structure.get('type') == 'backbone_assisted':
+        # 处理接口辅助路径
+        if structure.get('type') == 'interface_assisted':
             self.path_structure['uses_backbone'] = True
-            self.path_structure['backbone_utilization'] = structure.get('backbone_utilization', 0.0)
+            self.path_structure['interface_id'] = structure.get('interface_id')
             self.path_structure['backbone_path_id'] = structure.get('backbone_path_id')
+            self.path_structure['backbone_utilization'] = structure.get('backbone_utilization', 0.0)
             self.path_structure['access_length'] = structure.get('access_length', 0)
             self.path_structure['backbone_length'] = structure.get('backbone_length', 0)
             self.path_structure['total_length'] = structure.get('total_length', 0)
+        elif structure.get('type') == 'backbone_only':
+            self.path_structure['uses_backbone'] = True
+            self.path_structure['interface_id'] = structure.get('interface_id')
+            self.path_structure['backbone_path_id'] = structure.get('backbone_path_id')
+            self.path_structure['backbone_utilization'] = 1.0
         elif structure.get('type') == 'direct':
             self.path_structure['uses_backbone'] = False
             self.path_structure['backbone_utilization'] = 0.0
@@ -451,7 +457,7 @@ class SimplifiedVehicleScheduler:
         return best_point_id
     
     def _start_next_task(self, vehicle_id):
-        """开始执行车辆的下一个任务 - 简化版"""
+        """开始执行车辆的下一个任务 - 接口系统版"""
         if vehicle_id not in self.task_queues or not self.task_queues[vehicle_id]:
             return False
         
@@ -464,16 +470,16 @@ class SimplifiedVehicleScheduler:
         task.assigned_vehicle = vehicle_id
         task.start_time = self.env.current_time if hasattr(self.env, 'current_time') else 0
         
-        # 更新车辆状态 - 同步到环境
+        # 更新车辆状态
         self.vehicle_statuses[vehicle_id]['status'] = 'moving'
         self.vehicle_statuses[vehicle_id]['current_task'] = task_id
         
         if vehicle_id in self.env.vehicles:
             self.env.vehicles[vehicle_id]['status'] = 'moving'
         
-        # 规划路径 - 使用简化的规划方法
+        # 规划路径 - 使用接口系统
         if self.path_planner:
-            path_result = self._plan_vehicle_path(
+            path_result = self._plan_vehicle_path_with_interface(
                 vehicle_id,
                 self.vehicle_statuses[vehicle_id]['position'],
                 task.goal
@@ -481,20 +487,27 @@ class SimplifiedVehicleScheduler:
             
             if path_result:
                 if isinstance(path_result, tuple) and len(path_result) == 2:
-                    # 路径和结构信息
                     task.path, structure = path_result
                     task.update_path_structure(structure)
                     
+                    # 如果使用了接口，进行预约
+                    if structure.get('interface_id'):
+                        success = task.reserve_interface(
+                            structure['interface_id'], 
+                            self.backbone_network,
+                            duration=120  # 预约2分钟
+                        )
+                        if not success:
+                            print(f"警告: 接口 {structure['interface_id']} 预约失败")
+                    
                     # 更新统计信息
-                    if structure.get('type') == 'backbone_assisted':
+                    if structure.get('type') in ['interface_assisted', 'backbone_only']:
                         self.stats['backbone_assisted_paths'] += 1
                         self.vehicle_statuses[vehicle_id]['backbone_usage_count'] += 1
                     else:
                         self.stats['direct_paths'] += 1
                         self.vehicle_statuses[vehicle_id]['direct_path_count'] += 1
-                        
                 else:
-                    # 只有路径
                     task.path = path_result
                     task.update_path_structure({'type': 'direct'})
                     self.stats['direct_paths'] += 1
@@ -505,23 +518,31 @@ class SimplifiedVehicleScheduler:
                     self.env.vehicles[vehicle_id]['path'] = task.path
                     self.env.vehicles[vehicle_id]['path_index'] = 0
                     self.env.vehicles[vehicle_id]['progress'] = 0.0
-                    
-                    # 保存路径结构到车辆信息中
                     self.env.vehicles[vehicle_id]['path_structure'] = task.path_structure
                     
                     # 向交通管理器注册路径
                     if self.traffic_manager:
                         self.traffic_manager.register_vehicle_path(
-                            vehicle_id,
-                            task.path,
-                            task.start_time
+                            vehicle_id, task.path, task.start_time
                         )
                         
                 print(f"车辆 {vehicle_id} 开始任务 {task_id}，"
                       f"路径类型: {task.path_structure.get('type', 'unknown')}，"
-                      f"骨干利用率: {task.path_structure.get('backbone_utilization', 0):.2f}")
+                      f"接口: {task.path_structure.get('interface_id', 'N/A')}")
         
         return True
+    def _plan_vehicle_path_with_interface(self, vehicle_id, start, goal):
+        """使用接口系统为车辆规划路径"""
+        if not self.path_planner:
+            return None
+        
+        try:
+            # 使用新的接口系统规划路径
+            result = self.path_planner.plan_path(vehicle_id, start, goal, use_backbone=True)
+            return result
+        except Exception as e:
+            print(f"车辆 {vehicle_id} 接口路径规划失败: {e}")
+            return None
     
     def _plan_vehicle_path(self, vehicle_id, start, goal):
         """
@@ -767,11 +788,15 @@ class SimplifiedVehicleScheduler:
                     self.env.vehicles[vehicle_id]['status'] = 'idle'
     
     def _complete_task(self, vehicle_id, task_id):
-        """完成任务并更新统计信息"""
+        """完成任务并释放接口"""
         if task_id not in self.tasks:
             return
         
         task = self.tasks[task_id]
+        
+        # 释放接口预约
+        if self.backbone_network:
+            task.release_interface(self.backbone_network)
         
         # 更新任务状态
         task.status = 'completed'
@@ -781,20 +806,16 @@ class SimplifiedVehicleScheduler:
         # 更新统计信息
         self.stats['completed_tasks'] += 1
         
-        # 计算路径长度
         if task.path:
             path_length = self._calculate_distance_path(task.path)
             self.stats['total_distance'] += path_length
             self.vehicle_statuses[vehicle_id]['total_distance'] += path_length
         
-        # 更新车辆完成任务计数
         self.vehicle_statuses[vehicle_id]['completed_tasks'] += 1
         
         # 从任务队列中移除
         if self.task_queues[vehicle_id] and self.task_queues[vehicle_id][0] == task_id:
             self.task_queues[vehicle_id].pop(0)
-            
-            # 同步更新车辆状态中的任务队列
             if self.vehicle_statuses[vehicle_id]['task_queue']:
                 self.vehicle_statuses[vehicle_id]['task_queue'].pop(0)
         
@@ -803,7 +824,7 @@ class SimplifiedVehicleScheduler:
             self.traffic_manager.release_vehicle_path(vehicle_id)
         
         print(f"任务 {task_id} 完成，车辆 {vehicle_id}，"
-              f"使用骨干路径: {task.path_structure.get('uses_backbone', False)}")
+              f"使用接口: {task.path_structure.get('interface_id', 'N/A')}")
     
     def get_vehicle_info(self, vehicle_id):
         """获取车辆详细信息"""

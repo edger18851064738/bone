@@ -537,7 +537,7 @@ class OpenPitMineEnv:
             self.changed_callback(self)
             
     def save_to_file(self, filename):
-        """保存环境到文件
+        """保存环境到文件 - 包含接口系统状态
         
         Args:
             filename (str): 文件路径
@@ -546,7 +546,7 @@ class OpenPitMineEnv:
             bool: 保存是否成功
         """
         try:
-            # 构建数据字典
+            # 构建基础数据字典
             data = {
                 "width": self.width,
                 "height": self.height,
@@ -571,24 +571,229 @@ class OpenPitMineEnv:
                         "y": vehicle["position"][1],
                         "theta": vehicle["position"][2],
                         "type": vehicle["type"],
-                        "max_load": vehicle["max_load"]
+                        "max_load": vehicle["max_load"],
+                        "status": vehicle.get("status", "idle"),
+                        "load": vehicle.get("load", 0),
+                        "completed_cycles": vehicle.get("completed_cycles", 0),
+                        # 保存路径结构信息
+                        "path_structure": vehicle.get("path_structure", {}),
+                        # 保存当前路径（如果有的话）
+                        "current_path_length": len(vehicle.get("path", [])),
+                        "path_index": vehicle.get("path_index", 0),
+                        "progress": vehicle.get("progress", 0.0)
                     }
                     for vehicle_id, vehicle in self.vehicles.items()
-                ]
+                ],
+                # 保存当前环境时间和状态
+                "current_time": getattr(self, 'current_time', 0.0),
+                "running": getattr(self, 'running', False),
+                "paused": getattr(self, 'paused', False)
+            }
+            
+            # 保存骨干网络信息（如果存在）
+            backbone_data = self._save_backbone_network_data()
+            if backbone_data:
+                data["backbone_network"] = backbone_data
+            
+            # 保存接口状态信息（如果存在）
+            interface_data = self._save_interface_states()
+            if interface_data:
+                data["interface_states"] = interface_data
+            
+            # 保存调度器状态（如果存在）
+            scheduler_data = self._save_scheduler_states()
+            if scheduler_data:
+                data["scheduler_states"] = scheduler_data
+            
+            # 保存交通管理器状态（如果存在）
+            traffic_data = self._save_traffic_manager_states()
+            if traffic_data:
+                data["traffic_manager"] = traffic_data
+            
+            # 添加保存时间戳和版本信息
+            import time
+            data["save_metadata"] = {
+                "timestamp": time.time(),
+                "save_time": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "version": "v1.0_interface_system",
+                "total_vehicles": len(self.vehicles),
+                "total_loading_points": len(self.loading_points),
+                "total_unloading_points": len(self.unloading_points)
             }
             
             # 保存到文件
-            with open(filename, 'w') as f:
-                json.dump(data, f, indent=2)
+            with open(filename, 'w', encoding='utf-8') as f:
+                json.dump(data, f, indent=2, ensure_ascii=False)
+            
+            print(f"环境保存成功: {filename}")
+            print(f"- 车辆数量: {len(self.vehicles)}")
+            print(f"- 装载点: {len(self.loading_points)}")
+            print(f"- 卸载点: {len(self.unloading_points)}")
+            
+            if backbone_data:
+                print(f"- 骨干路径: {backbone_data.get('total_paths', 0)} 条")
+                print(f"- 骨干接口: {len(interface_data) if interface_data else 0} 个")
                 
             return True
             
         except Exception as e:
             print(f"保存环境失败: {str(e)}")
+            import traceback
+            traceback.print_exc()
             return False
+
+    def _save_backbone_network_data(self):
+        """保存骨干网络数据"""
+        # 检查是否有骨干网络引用
+        backbone_network = getattr(self, 'backbone_network', None)
+        
+        if not backbone_network or not hasattr(backbone_network, 'backbone_paths'):
+            return None
+        
+        try:
+            backbone_data = {
+                "total_paths": len(backbone_network.backbone_paths),
+                "interface_spacing": getattr(backbone_network, 'interface_spacing', 10),
+                "generation_stats": getattr(backbone_network, 'stats', {}),
+                "paths": {}
+            }
+            
+            # 保存每条骨干路径的基本信息（不保存完整路径点以节省空间）
+            for path_id, path_data in backbone_network.backbone_paths.items():
+                backbone_data["paths"][path_id] = {
+                    "id": path_id,
+                    "start_point_type": path_data["start_point"]["type"],
+                    "start_point_id": path_data["start_point"]["id"],
+                    "end_point_type": path_data["end_point"]["type"],
+                    "end_point_id": path_data["end_point"]["id"],
+                    "length": path_data.get("length", 0),
+                    "quality": path_data.get("quality", 0),
+                    "usage_count": path_data.get("usage_count", 0),
+                    "path_points_count": len(path_data.get("path", [])),
+                    "created_time": path_data.get("created_time", 0)
+                }
+            
+            return backbone_data
+            
+        except Exception as e:
+            print(f"保存骨干网络数据失败: {e}")
+            return None
+
+    def _save_interface_states(self):
+        """保存接口状态数据"""
+        # 检查是否有骨干网络和接口
+        backbone_network = getattr(self, 'backbone_network', None)
+        
+        if (not backbone_network or 
+            not hasattr(backbone_network, 'backbone_interfaces') or
+            not backbone_network.backbone_interfaces):
+            return None
+        
+        try:
+            interface_states = {}
+            
+            for interface_id, interface in backbone_network.backbone_interfaces.items():
+                interface_states[interface_id] = {
+                    "interface_id": interface.interface_id,
+                    "position": interface.position,
+                    "direction": interface.direction,
+                    "backbone_path_id": interface.backbone_path_id,
+                    "path_index": interface.path_index,
+                    "access_difficulty": interface.access_difficulty,
+                    "usage_count": interface.usage_count,
+                    "is_occupied": interface.is_occupied,
+                    "occupied_by": interface.occupied_by,
+                    "reservation_time": interface.reservation_time
+                }
+            
+            return interface_states
+            
+        except Exception as e:
+            print(f"保存接口状态失败: {e}")
+            return None
+
+    def _save_scheduler_states(self):
+        """保存调度器状态数据"""
+        # 检查是否有调度器引用
+        scheduler = getattr(self, 'vehicle_scheduler', None)
+        
+        if not scheduler:
+            return None
+        
+        try:
+            scheduler_data = {
+                "total_tasks": len(getattr(scheduler, 'tasks', {})),
+                "completed_tasks": len([t for t in getattr(scheduler, 'tasks', {}).values() 
+                                    if t.status == 'completed']),
+                "active_tasks": len([t for t in getattr(scheduler, 'tasks', {}).values() 
+                                if t.status in ['assigned', 'in_progress']]),
+                "vehicle_statuses": {},
+                "mission_templates": list(getattr(scheduler, 'mission_templates', {}).keys()),
+                "stats": getattr(scheduler, 'stats', {})
+            }
+            
+            # 保存车辆状态摘要
+            if hasattr(scheduler, 'vehicle_statuses'):
+                for vehicle_id, status in scheduler.vehicle_statuses.items():
+                    scheduler_data["vehicle_statuses"][vehicle_id] = {
+                        "status": status.get("status", "idle"),
+                        "current_task": status.get("current_task"),
+                        "completed_tasks": status.get("completed_tasks", 0),
+                        "total_distance": status.get("total_distance", 0),
+                        "utilization_rate": status.get("utilization_rate", 0),
+                        "backbone_usage_count": status.get("backbone_usage_count", 0),
+                        "direct_path_count": status.get("direct_path_count", 0),
+                        "task_queue_length": len(status.get("task_queue", []))
+                    }
+            
+            return scheduler_data
+            
+        except Exception as e:
+            print(f"保存调度器状态失败: {e}")
+            return None
+
+    def _save_traffic_manager_states(self):
+        """保存交通管理器状态数据"""
+        # 检查是否有交通管理器引用
+        traffic_manager = getattr(self, 'traffic_manager', None)
+        
+        if not traffic_manager:
+            return None
+        
+        try:
+            traffic_data = {
+                "active_vehicles": len(getattr(traffic_manager, 'active_paths', {})),
+                "total_reservations": len(getattr(traffic_manager, 'path_reservations', {})),
+                "interface_reservations": len(getattr(traffic_manager, 'interface_reservations', {})),
+                "safety_distance": getattr(traffic_manager, 'safety_distance', 8.0),
+                "stats": getattr(traffic_manager, 'stats', {}),
+                "ecbs_stats": {}
+            }
+            
+            # 保存ECBS统计信息
+            if hasattr(traffic_manager, 'ecbs_solver') and traffic_manager.ecbs_solver:
+                traffic_data["ecbs_stats"] = getattr(traffic_manager.ecbs_solver, 'stats', {})
+            
+            return traffic_data
+            
+        except Exception as e:
+            print(f"保存交通管理器状态失败: {e}")
+            return None
+
+    def set_backbone_network(self, backbone_network):
+        """设置环境的骨干网络引用"""
+        self.backbone_network = backbone_network
+
+    def set_vehicle_scheduler(self, scheduler):
+        """设置环境的调度器引用"""
+        self.vehicle_scheduler = scheduler
+
+    def set_traffic_manager(self, traffic_manager):
+        """设置环境的交通管理器引用"""
+        self.traffic_manager = traffic_manager
     
     def load_from_file(self, filename):
-        """从文件加载环境
+        """从文件加载环境 - 包含接口系统状态恢复
         
         Args:
             filename (str): 文件路径
@@ -598,7 +803,7 @@ class OpenPitMineEnv:
         """
         try:
             # 读取文件
-            with open(filename, 'r') as f:
+            with open(filename, 'r', encoding='utf-8') as f:
                 data = json.load(f)
             
             # 重置环境
@@ -642,19 +847,53 @@ class OpenPitMineEnv:
             for area in data.get("parking_areas", []):
                 self.add_parking_area(
                     (area["x"], area["y"], area.get("theta", 0)),
-
                     area.get("capacity", 5)
                 )
             
             # 加载车辆
             for vehicle in data.get("vehicles", []):
-                self.add_vehicle(
+                success = self.add_vehicle(
                     vehicle["id"],
                     (vehicle["x"], vehicle["y"], vehicle.get("theta", 0)),
                     None,
                     vehicle.get("type", "dump_truck"),
                     vehicle.get("max_load", 100)
                 )
+                
+                if success and vehicle["id"] in self.vehicles:
+                    # 恢复车辆状态
+                    self.vehicles[vehicle["id"]].update({
+                        "status": vehicle.get("status", "idle"),
+                        "load": vehicle.get("load", 0),
+                        "completed_cycles": vehicle.get("completed_cycles", 0),
+                        "path_structure": vehicle.get("path_structure", {}),
+                        "path_index": vehicle.get("path_index", 0),
+                        "progress": vehicle.get("progress", 0.0)
+                    })
+            
+            # 恢复环境状态
+            self.current_time = data.get("current_time", 0.0)
+            self.running = data.get("running", False)
+            self.paused = data.get("paused", False)
+            
+            # 保存接口恢复数据，供后续系统组件使用
+            self._saved_backbone_data = data.get("backbone_network")
+            self._saved_interface_states = data.get("interface_states")
+            self._saved_scheduler_states = data.get("scheduler_states")
+            self._saved_traffic_states = data.get("traffic_manager")
+            
+            # 显示加载信息
+            save_metadata = data.get("save_metadata", {})
+            if save_metadata:
+                print(f"环境加载成功: {filename}")
+                print(f"- 保存时间: {save_metadata.get('save_time', 'Unknown')}")
+                print(f"- 版本: {save_metadata.get('version', 'Unknown')}")
+                print(f"- 车辆数量: {len(self.vehicles)}")
+                
+                if self._saved_backbone_data:
+                    print(f"- 骨干路径: {self._saved_backbone_data.get('total_paths', 0)} 条")
+                if self._saved_interface_states:
+                    print(f"- 接口状态: {len(self._saved_interface_states)} 个")
             
             # 通知环境变化
             self._notify_change()
@@ -663,7 +902,45 @@ class OpenPitMineEnv:
             
         except Exception as e:
             print(f"加载环境失败: {str(e)}")
+            import traceback
+            traceback.print_exc()
             return False
+
+    def restore_interface_states(self, backbone_network):
+        """恢复接口状态到骨干网络"""
+        if not self._saved_interface_states or not backbone_network:
+            return False
+        
+        try:
+            restored_count = 0
+            
+            for interface_id, state_data in self._saved_interface_states.items():
+                if interface_id in backbone_network.backbone_interfaces:
+                    interface = backbone_network.backbone_interfaces[interface_id]
+                    
+                    # 恢复状态
+                    interface.usage_count = state_data.get("usage_count", 0)
+                    interface.is_occupied = state_data.get("is_occupied", False)
+                    interface.occupied_by = state_data.get("occupied_by")
+                    interface.reservation_time = state_data.get("reservation_time")
+                    
+                    restored_count += 1
+            
+            print(f"恢复了 {restored_count} 个接口的状态")
+            return True
+            
+        except Exception as e:
+            print(f"恢复接口状态失败: {e}")
+            return False
+
+    def get_saved_states(self):
+        """获取保存的状态数据，供其他组件使用"""
+        return {
+            'backbone_data': getattr(self, '_saved_backbone_data', None),
+            'interface_states': getattr(self, '_saved_interface_states', None),
+            'scheduler_states': getattr(self, '_saved_scheduler_states', None),
+            'traffic_states': getattr(self, '_saved_traffic_states', None)
+        }
     def _get_obstacle_list(self):
         """将点障碍物转换为矩形列表"""
         obstacles = []

@@ -1,18 +1,54 @@
+
+
 import math
 import time
 import threading
 from collections import defaultdict, OrderedDict
 from RRT import RRTPlanner
 
+class BackboneInterface:
+    """骨干路径接口点"""
+    def __init__(self, interface_id, position, direction, backbone_path_id, 
+                 path_index, access_difficulty=0.0):
+        self.interface_id = interface_id
+        self.position = position  # (x, y, theta)
+        self.direction = direction  # 接口进入方向
+        self.backbone_path_id = backbone_path_id
+        self.path_index = path_index  # 在骨干路径中的索引
+        self.access_difficulty = access_difficulty  # 接入难度评估
+        self.usage_count = 0  # 使用次数统计
+        self.is_occupied = False  # 是否被占用
+        self.occupied_by = None  # 被哪个车辆占用
+        self.reservation_time = None  # 预约时间
+        
+    def reserve(self, vehicle_id, duration=30):
+        """预约接口"""
+        self.is_occupied = True
+        self.occupied_by = vehicle_id
+        self.reservation_time = time.time() + duration
+        
+    def release(self):
+        """释放接口"""
+        self.is_occupied = False
+        self.occupied_by = None
+        self.reservation_time = None
+        
+    def is_available(self):
+        """检查接口是否可用"""
+        if not self.is_occupied:
+            return True
+        
+        # 检查预约是否过期
+        if self.reservation_time and time.time() > self.reservation_time:
+            self.release()
+            return True
+            
+        return False
+
+
 class SimplifiedBackbonePathNetwork:
     """
-    简化的骨干路径网络 - 按照用户设计理念重新实现
-    骨干网络是特殊点之间的完整路径集合，不包含复杂的网络结构
-    
-    设计理念：
-    1. 读取地图中的特殊点（装载点、卸载点、停车点）
-    2. 规划特殊点之间的完整骨干路径（不同类型点之间）
-    3. 提供简单的查找和拼接接口
+    简化的骨干路径网络 - 带接口系统优化版
     """
     
     def __init__(self, env):
@@ -24,6 +60,14 @@ class SimplifiedBackbonePathNetwork:
             'parking': []
         }
         
+        # 骨干接口系统
+        self.backbone_interfaces = {}  # {interface_id: BackboneInterface}
+        self.path_interfaces = defaultdict(list)  # {path_id: [interface_ids]}
+        self.interface_spacing = 10  # 接口间距（路径点数）
+        
+        # 空间索引用于快速查找接口
+        self.interface_spatial_index = {}  # 简化的空间索引
+        
         # 路径查找索引
         self.paths_to_target = defaultdict(list)  # {(target_type, target_id): [path_ids]}
         self.paths_from_source = defaultdict(list)  # {(source_type, source_id): [path_ids]}
@@ -34,30 +78,22 @@ class SimplifiedBackbonePathNetwork:
         # 性能统计
         self.stats = {
             'total_paths': 0,
+            'total_interfaces': 0,
+            'interface_usage': defaultdict(int),
             'generation_time': 0,
             'average_path_length': 0,
             'path_usage_count': defaultdict(int),
             'total_usage': 0
         }
         
-        print("初始化简化的骨干路径网络")
+        print("初始化带接口系统的骨干路径网络")
     
-    def generate_network(self, connection_spacing=None, quality_threshold=0.6):
+    def generate_backbone_network(self, quality_threshold=0.6, interface_spacing=10):
         """
-        生成骨干路径网络 - 兼容原接口
-        只生成不同类型特殊点之间的完整路径
+        生成骨干路径网络并创建接口点
+        """
+        self.interface_spacing = interface_spacing
         
-        Args:
-            connection_spacing: 兼容参数，不再使用
-            quality_threshold: 路径质量阈值
-        """
-        return self.generate_backbone_network(quality_threshold)
-    
-    def generate_backbone_network(self, quality_threshold=0.6):
-        """
-        生成骨干路径网络
-        只生成不同类型特殊点之间的完整路径
-        """
         start_time = time.time()
         print("开始生成骨干路径网络...")
         
@@ -79,13 +115,18 @@ class SimplifiedBackbonePathNetwork:
             # 3. 生成骨干路径
             self._generate_backbone_paths(quality_threshold)
             
-            # 4. 建立查找索引
-            self._build_path_indexes()
+            # 4. 生成骨干接口点
+            self._generate_backbone_interfaces()
             
-            # 5. 统计信息
+            # 5. 建立查找索引
+            self._build_path_indexes()
+            self._build_interface_spatial_index()
+            
+            # 6. 统计信息
             generation_time = time.time() - start_time
             self.stats['generation_time'] = generation_time
             self.stats['total_paths'] = len(self.backbone_paths)
+            self.stats['total_interfaces'] = len(self.backbone_interfaces)
             
             if self.backbone_paths:
                 total_length = sum(path_data['length'] for path_data in self.backbone_paths.values())
@@ -93,6 +134,8 @@ class SimplifiedBackbonePathNetwork:
             
             print(f"骨干路径网络生成完成!")
             print(f"- 总路径数: {len(self.backbone_paths)}")
+            print(f"- 总接口数: {len(self.backbone_interfaces)}")
+            print(f"- 接口间距: {self.interface_spacing} 个路径点")
             print(f"- 生成耗时: {generation_time:.2f}秒")
             print(f"- 平均路径长度: {self.stats['average_path_length']:.1f}")
             
@@ -102,6 +145,407 @@ class SimplifiedBackbonePathNetwork:
             print(f"生成骨干路径网络失败: {e}")
             return False
     
+    def _generate_backbone_interfaces(self):
+        """为每条骨干路径生成接口点"""
+        print("正在生成骨干路径接口点...")
+        
+        total_interfaces = 0
+        
+        for path_id, path_data in self.backbone_paths.items():
+            path = path_data['path']
+            if len(path) < self.interface_spacing:
+                continue
+                
+            interfaces_for_path = []
+            
+            # 从路径起点开始，每隔interface_spacing个点设置一个接口
+            for i in range(0, len(path), self.interface_spacing):
+                if i >= len(path):
+                    break
+                    
+                # 计算接口方向
+                direction = self._calculate_interface_direction(path, i)
+                
+                # 创建接口
+                interface_id = f"{path_id}_interface_{i // self.interface_spacing}"
+                interface = BackboneInterface(
+                    interface_id=interface_id,
+                    position=path[i],
+                    direction=direction,
+                    backbone_path_id=path_id,
+                    path_index=i,
+                    access_difficulty=self._evaluate_interface_access_difficulty(path, i)
+                )
+                
+                # 存储接口
+                self.backbone_interfaces[interface_id] = interface
+                interfaces_for_path.append(interface_id)
+                total_interfaces += 1
+            
+            # 确保路径终点也有接口
+            if len(path) > 0:
+                last_index = len(path) - 1
+                last_interface_id = f"{path_id}_interface_end"
+                if last_interface_id not in self.backbone_interfaces:
+                    direction = self._calculate_interface_direction(path, last_index)
+                    last_interface = BackboneInterface(
+                        interface_id=last_interface_id,
+                        position=path[last_index],
+                        direction=direction,
+                        backbone_path_id=path_id,
+                        path_index=last_index,
+                        access_difficulty=self._evaluate_interface_access_difficulty(path, last_index)
+                    )
+                    
+                    self.backbone_interfaces[last_interface_id] = last_interface
+                    interfaces_for_path.append(last_interface_id)
+                    total_interfaces += 1
+            
+            self.path_interfaces[path_id] = interfaces_for_path
+        
+        print(f"成功生成 {total_interfaces} 个骨干接口点")
+    
+    def _calculate_interface_direction(self, path, index):
+        """计算接口的方向角"""
+        if index < len(path) - 1:
+            # 使用当前点到下一点的方向
+            dx = path[index + 1][0] - path[index][0]
+            dy = path[index + 1][1] - path[index][1]
+            if abs(dx) > 0.001 or abs(dy) > 0.001:
+                return math.atan2(dy, dx)
+        
+        # 如果是最后一个点或者方向向量为零，使用点本身的朝向
+        return path[index][2] if len(path[index]) > 2 else 0.0
+    
+    def _evaluate_interface_access_difficulty(self, path, index):
+        """评估接口的接入难度"""
+        difficulty = 0.0
+        
+        # 基于周围障碍物密度
+        x, y = int(path[index][0]), int(path[index][1])
+        obstacle_count = 0
+        search_radius = 5
+        
+        for dx in range(-search_radius, search_radius + 1):
+            for dy in range(-search_radius, search_radius + 1):
+                check_x, check_y = x + dx, y + dy
+                if (0 <= check_x < self.env.width and 
+                    0 <= check_y < self.env.height and
+                    hasattr(self.env, 'grid') and
+                    self.env.grid[check_x, check_y] == 1):
+                    obstacle_count += 1
+        
+        difficulty += obstacle_count * 0.1
+        
+        # 基于路径曲率（转弯越急难度越高）
+        if index > 0 and index < len(path) - 1:
+            curvature = self._calculate_path_curvature(path, index)
+            difficulty += curvature * 5
+        
+        return difficulty
+    
+    def _calculate_path_curvature(self, path, index):
+        """计算路径在指定点的曲率"""
+        if index <= 0 or index >= len(path) - 1:
+            return 0.0
+        
+        p1 = path[index - 1]
+        p2 = path[index]
+        p3 = path[index + 1]
+        
+        # 使用三点法计算曲率
+        v1 = (p2[0] - p1[0], p2[1] - p1[1])
+        v2 = (p3[0] - p2[0], p3[1] - p2[1])
+        
+        len_v1 = math.sqrt(v1[0]**2 + v1[1]**2)
+        len_v2 = math.sqrt(v2[0]**2 + v2[1]**2)
+        
+        if len_v1 < 0.001 or len_v2 < 0.001:
+            return 0.0
+        
+        cos_angle = (v1[0]*v2[0] + v1[1]*v2[1]) / (len_v1 * len_v2)
+        cos_angle = max(-1, min(1, cos_angle))
+        angle = math.acos(cos_angle)
+        
+        # 曲率 = 角度变化 / 平均段长
+        avg_length = (len_v1 + len_v2) / 2
+        return angle / (avg_length + 0.001)
+    
+    def _build_interface_spatial_index(self):
+        """建立接口的空间索引"""
+        self.interface_spatial_index = {}
+        
+        # 简化的网格索引
+        grid_size = 20  # 网格大小
+        
+        for interface_id, interface in self.backbone_interfaces.items():
+            x, y = interface.position[0], interface.position[1]
+            grid_x = int(x // grid_size)
+            grid_y = int(y // grid_size)
+            grid_key = (grid_x, grid_y)
+            
+            if grid_key not in self.interface_spatial_index:
+                self.interface_spatial_index[grid_key] = []
+            
+            self.interface_spatial_index[grid_key].append(interface_id)
+    
+    def find_nearest_interface(self, position, target_type, target_id, max_distance=50, debug=True):
+        """
+        找到最近的可用骨干接口 - 带调试版本
+        """
+        if debug:
+            candidates = self.debug_find_interface(position, target_type, target_id, max_distance)
+            if not candidates:
+                return None
+        else:
+            # 原有逻辑
+            target_paths = self.find_paths_to_target(target_type, target_id)
+            if not target_paths:
+                return None
+            
+            nearby_interfaces = self._find_nearby_interfaces(position, max_distance)
+            
+            candidate_interfaces = []
+            for interface_id in nearby_interfaces:
+                interface = self.backbone_interfaces[interface_id]
+                if any(path_data['id'] == interface.backbone_path_id for path_data in target_paths):
+                    if interface.is_available():
+                        candidate_interfaces.append(interface)
+            
+            if not candidate_interfaces:
+                return None
+            
+            candidates = candidate_interfaces
+        
+        # 评估接口并选择最佳的
+        best_interface = None
+        best_score = float('inf')
+        
+        for interface in candidates:
+            score = self._evaluate_interface_score(position, interface, target_type, target_id)
+            if debug:
+                print(f"接口 {interface.interface_id} 评分: {score:.2f}")
+            if score < best_score:
+                best_score = score
+                best_interface = interface
+        
+        if debug and best_interface:
+            print(f"✅ 选择接口: {best_interface.interface_id}")
+        
+        return best_interface
+        
+    def _find_nearby_interfaces(self, position, max_distance):
+        """使用空间索引查找附近的接口"""
+        nearby_interfaces = []
+        x, y = position[0], position[1]
+        grid_size = 20
+        
+        # 计算搜索半径（网格数）
+        search_radius = max(1, int(max_distance // grid_size)) + 1
+        center_grid_x = int(x // grid_size)
+        center_grid_y = int(y // grid_size)
+        
+        # 搜索周围的网格
+        for dx in range(-search_radius, search_radius + 1):
+            for dy in range(-search_radius, search_radius + 1):
+                grid_key = (center_grid_x + dx, center_grid_y + dy)
+                if grid_key in self.interface_spatial_index:
+                    for interface_id in self.interface_spatial_index[grid_key]:
+                        interface = self.backbone_interfaces[interface_id]
+                        distance = self._calculate_distance(position, interface.position)
+                        if distance <= max_distance:
+                            nearby_interfaces.append(interface_id)
+        
+        return nearby_interfaces
+    
+    def _evaluate_interface_score(self, vehicle_position, interface, target_type, target_id):
+        """
+        评估接口的综合得分（越小越好）
+        """
+        # 1. 距离成本
+        distance = self._calculate_distance(vehicle_position, interface.position)
+        distance_cost = distance
+        
+        # 2. 接入难度成本
+        access_difficulty_cost = interface.access_difficulty * 10
+        
+        # 3. 角度对齐成本
+        vehicle_heading = vehicle_position[2] if len(vehicle_position) > 2 else 0
+        interface_heading = interface.direction
+        angle_diff = abs(vehicle_heading - interface_heading)
+        angle_diff = min(angle_diff, 2*math.pi - angle_diff)
+        angle_cost = angle_diff * 5
+        
+        # 4. 使用频率成本（避免热点）
+        usage_cost = interface.usage_count * 2
+        
+        # 5. 剩余骨干路径长度（越长越好，所以成本为负）
+        remaining_path_cost = -self._calculate_remaining_path_length(interface, target_type, target_id)
+        
+        total_score = (distance_cost + access_difficulty_cost + angle_cost + 
+                      usage_cost + remaining_path_cost * 0.1)
+        
+        return total_score
+    
+    def _calculate_remaining_path_length(self, interface, target_type, target_id):
+        """计算从接口到目标的剩余路径长度"""
+        backbone_path_data = self.backbone_paths.get(interface.backbone_path_id)
+        if not backbone_path_data:
+            return 0
+        
+        backbone_path = backbone_path_data['path']
+        remaining_length = 0
+        
+        # 从接口位置到路径终点的长度
+        for i in range(interface.path_index, len(backbone_path) - 1):
+            remaining_length += self._calculate_distance(backbone_path[i], backbone_path[i + 1])
+        
+        return remaining_length
+    
+    def get_path_from_position_to_target_via_interface(self, current_position, target_type, target_id):
+        """
+        通过骨干接口获取从当前位置到目标的完整路径
+        
+        Args:
+            current_position: 当前位置
+            target_type: 目标类型
+            target_id: 目标ID
+            
+        Returns:
+            tuple: (完整路径, 路径结构信息)
+        """
+        # 1. 查找最佳骨干接口
+        best_interface = self.find_nearest_interface(current_position, target_type, target_id)
+        
+        if not best_interface:
+            print(f"未找到到 {target_type}_{target_id} 的可用骨干接口")
+            return None, None
+        
+        # 2. 预约接口
+        # 这里可以添加车辆ID参数来正确预约
+        best_interface.reserve("vehicle_temp", duration=60)  # 预约1分钟
+        
+        # 3. 规划从当前位置到接口的接入路径
+        interface_position = best_interface.position
+        
+        # 如果当前位置就在接口附近，直接使用骨干路径
+        if self._calculate_distance(current_position, interface_position) < 3.0:
+            print(f"当前位置接近骨干接口 {best_interface.interface_id}，直接使用骨干路径")
+            
+            # 获取从接口到目标的骨干路径段
+            backbone_segment = self._get_backbone_segment_from_interface(best_interface, target_type, target_id)
+            
+            return backbone_segment, {
+                'type': 'backbone_only',
+                'interface_id': best_interface.interface_id,
+                'backbone_path_id': best_interface.backbone_path_id,
+                'backbone_utilization': 1.0,
+                'access_length': 0,
+                'backbone_length': len(backbone_segment) if backbone_segment else 0,
+                'total_length': len(backbone_segment) if backbone_segment else 0
+            }
+        
+        # 4. 规划接入路径
+        print(f"规划到骨干接口 {best_interface.interface_id} 的接入路径")
+        access_path = self.planner.plan_path(current_position, interface_position, max_iterations=3000)
+        
+        if not access_path or len(access_path) < 2:
+            print("接入路径规划失败")
+            best_interface.release()  # 释放接口预约
+            return None, None
+        
+        # 5. 获取骨干路径段
+        backbone_segment = self._get_backbone_segment_from_interface(best_interface, target_type, target_id)
+        
+        if not backbone_segment:
+            print("获取骨干路径段失败")
+            best_interface.release()
+            return None, None
+        
+        # 6. 拼接路径
+        complete_path = self._merge_paths(access_path, backbone_segment)
+        
+        if not complete_path:
+            print("路径拼接失败")
+            best_interface.release()
+            return None, None
+        
+        # 7. 构建路径结构信息
+        structure = {
+            'type': 'interface_assisted',
+            'interface_id': best_interface.interface_id,
+            'backbone_path_id': best_interface.backbone_path_id,
+            'access_path': access_path,
+            'backbone_path': backbone_segment,
+            'backbone_utilization': len(backbone_segment) / len(complete_path),
+            'access_length': len(access_path),
+            'backbone_length': len(backbone_segment),
+            'total_length': len(complete_path)
+        }
+        
+        # 8. 更新使用统计
+        best_interface.usage_count += 1
+        self.stats['interface_usage'][best_interface.interface_id] += 1
+        self.stats['total_usage'] += 1
+        
+        print(f"接口辅助路径生成成功: 总长度{len(complete_path)}, "
+              f"骨干利用率{structure['backbone_utilization']:.2f}, "
+              f"使用接口{best_interface.interface_id}")
+        
+        return complete_path, structure
+    
+    def _get_backbone_segment_from_interface(self, interface, target_type, target_id):
+        """从接口获取到目标的骨干路径段"""
+        backbone_path_data = self.backbone_paths.get(interface.backbone_path_id)
+        if not backbone_path_data:
+            return None
+        
+        backbone_path = backbone_path_data['path']
+        
+        # 从接口位置开始到路径终点的段
+        if interface.path_index < len(backbone_path):
+            return backbone_path[interface.path_index:]
+        
+        return None
+    
+    def release_interface(self, interface_id):
+        """释放接口"""
+        if interface_id in self.backbone_interfaces:
+            self.backbone_interfaces[interface_id].release()
+    
+    def get_interface_statistics(self):
+        """获取接口使用统计"""
+        stats = {
+            'total_interfaces': len(self.backbone_interfaces),
+            'available_interfaces': sum(1 for i in self.backbone_interfaces.values() if i.is_available()),
+            'occupied_interfaces': sum(1 for i in self.backbone_interfaces.values() if i.is_occupied),
+            'interface_usage': dict(self.stats['interface_usage']),
+            'most_used_interface': None,
+            'least_used_interface': None
+        }
+        
+        if self.backbone_interfaces:
+            most_used = max(self.backbone_interfaces.values(), key=lambda x: x.usage_count)
+            least_used = min(self.backbone_interfaces.values(), key=lambda x: x.usage_count)
+            stats['most_used_interface'] = {
+                'id': most_used.interface_id,
+                'usage_count': most_used.usage_count
+            }
+            stats['least_used_interface'] = {
+                'id': least_used.interface_id,
+                'usage_count': least_used.usage_count
+            }
+        
+        return stats
+    
+    # 保持原有接口兼容性
+    def get_path_from_position_to_target(self, current_position, target_type, target_id):
+        """兼容原有接口，内部调用新的接口系统"""
+        return self.get_path_from_position_to_target_via_interface(
+            current_position, target_type, target_id
+        )
+    
+    # ... 其他原有方法保持不变 ...
     def _load_special_points(self):
         """载入和分类特殊点"""
         # 装载点
@@ -221,9 +665,11 @@ class SimplifiedBackbonePathNetwork:
             return False
     
     def _build_path_indexes(self):
-        """建立路径查找索引"""
+        """建立路径查找索引 - 修复版本"""
         self.paths_to_target.clear()
         self.paths_from_source.clear()
+        
+        print("开始建立路径索引...")
         
         for path_id, path_data in self.backbone_paths.items():
             start_point = path_data['start_point']
@@ -231,142 +677,23 @@ class SimplifiedBackbonePathNetwork:
             
             # 按终点建立索引
             target_key = (end_point['type'], end_point['id'])
-            self.paths_to_target[target_key].append(path_id)
+            self.paths_to_target[target_key].append(path_data)  # 注意：这里存储的是path_data，不是path_id
             
             # 按起点建立索引
             source_key = (start_point['type'], start_point['id'])
-            self.paths_from_source[source_key].append(path_id)
+            self.paths_from_source[source_key].append(path_data)
+            
+            print(f"索引路径 {path_id}: {source_key} -> {target_key}")
+        
+        print(f"路径索引建立完成，目标索引: {len(self.paths_to_target)} 个")
     
     def find_paths_to_target(self, target_type, target_id):
-        """
-        查找到指定目标的所有骨干路径
-        
-        Args:
-            target_type: 目标类型 ('loading', 'unloading', 'parking')
-            target_id: 目标ID
-            
-        Returns:
-            list: 骨干路径数据列表
-        """
+        """查找到指定目标的所有骨干路径"""
         target_key = (target_type, target_id)
-        path_ids = self.paths_to_target.get(target_key, [])
-        
-        paths = []
-        for path_id in path_ids:
-            if path_id in self.backbone_paths:
-                paths.append(self.backbone_paths[path_id])
-        
-        return paths
-    
-    def find_nearest_backbone_path(self, current_position, target_type, target_id):
-        """
-        找到离当前位置最近的到目标的骨干路径
-        
-        Args:
-            current_position: 当前位置 (x, y, theta)
-            target_type: 目标类型
-            target_id: 目标ID
-            
-        Returns:
-            dict: 最近的骨干路径数据，None如果没找到
-        """
-        # 获取所有到目标的骨干路径
-        candidate_paths = self.find_paths_to_target(target_type, target_id)
-        
-        if not candidate_paths:
-            return None
-        
-        # 找到离当前位置最近的骨干路径起点
-        best_path = None
-        min_distance = float('inf')
-        
-        for path_data in candidate_paths:
-            start_pos = path_data['start_point']['position']
-            distance = self._calculate_distance(current_position, start_pos)
-            
-            if distance < min_distance:
-                min_distance = distance
-                best_path = path_data
-        
-        return best_path
-    
-    def get_path_from_position_to_target(self, current_position, target_type, target_id):
-        """
-        获取从当前位置到目标的完整路径（包含接入路径和骨干路径）
-        
-        Args:
-            current_position: 当前位置
-            target_type: 目标类型
-            target_id: 目标ID
-            
-        Returns:
-            tuple: (完整路径, 路径结构信息)
-        """
-        # 1. 查找最近的骨干路径
-        backbone_path_data = self.find_nearest_backbone_path(current_position, target_type, target_id)
-        
-        if not backbone_path_data:
-            print(f"未找到到 {target_type}_{target_id} 的骨干路径")
-            return None, None
-        
-        # 2. 规划从当前位置到骨干路径起点的接入路径
-        backbone_start_pos = backbone_path_data['start_point']['position']
-        
-        # 如果当前位置就是骨干路径起点，直接返回骨干路径
-        if self._calculate_distance(current_position, backbone_start_pos) < 2.0:
-            print(f"当前位置接近骨干路径起点，直接使用骨干路径 {backbone_path_data['id']}")
-            return backbone_path_data['path'], {
-                'type': 'backbone_only',
-                'backbone_path_id': backbone_path_data['id'],
-                'backbone_utilization': 1.0
-            }
-        
-        # 规划接入路径
-        print(f"规划接入路径到骨干路径 {backbone_path_data['id']}")
-        access_path = self.planner.plan_path(current_position, backbone_start_pos, max_iterations=3000)
-        
-        if not access_path or len(access_path) < 2:
-            print("接入路径规划失败")
-            return None, None
-        
-        # 3. 拼接路径
-        complete_path = self._merge_paths(access_path, backbone_path_data['path'])
-        
-        if not complete_path:
-            print("路径拼接失败")
-            return None, None
-        
-        # 4. 构建路径结构信息
-        structure = {
-            'type': 'backbone_assisted',
-            'access_path': access_path,
-            'backbone_path': backbone_path_data['path'],
-            'backbone_path_id': backbone_path_data['id'],
-            'backbone_utilization': len(backbone_path_data['path']) / len(complete_path),
-            'access_length': len(access_path),
-            'backbone_length': len(backbone_path_data['path']),
-            'total_length': len(complete_path)
-        }
-        
-        # 5. 更新使用统计
-        self.backbone_paths[backbone_path_data['id']]['usage_count'] += 1
-        self.stats['path_usage_count'][backbone_path_data['id']] += 1
-        self.stats['total_usage'] += 1
-        
-        print(f"完整路径生成成功: 总长度{len(complete_path)}, 骨干利用率{structure['backbone_utilization']:.2f}")
-        
-        return complete_path, structure
+        return self.paths_to_target.get(target_key, [])
     
     def identify_target_point(self, target_position):
-        """
-        识别目标位置是否为特殊点
-        
-        Args:
-            target_position: 目标位置
-            
-        Returns:
-            tuple: (target_type, target_id) 或 (None, None)
-        """
+        """识别目标位置是否为特殊点"""
         tolerance = 2.0  # 位置容差
         
         # 检查是否为装载点
@@ -387,16 +714,7 @@ class SimplifiedBackbonePathNetwork:
         return None, None
     
     def _merge_paths(self, access_path, backbone_path):
-        """
-        合并接入路径和骨干路径
-        
-        Args:
-            access_path: 接入路径
-            backbone_path: 骨干路径
-            
-        Returns:
-            list: 合并后的完整路径
-        """
+        """合并接入路径和骨干路径"""
         if not access_path or not backbone_path:
             return None
         
@@ -512,86 +830,6 @@ class SimplifiedBackbonePathNetwork:
             print(f"警告: 无法创建RRTPlanner: {e}")
             return None
     
-    def get_statistics(self):
-        """获取统计信息"""
-        stats = self.stats.copy()
-        
-        if self.backbone_paths:
-            # 路径使用情况
-            stats['total_usage'] = sum(path_data['usage_count'] for path_data in self.backbone_paths.values())
-            
-            # 最常用的路径
-            if self.backbone_paths:
-                most_used_path = max(self.backbone_paths.items(), 
-                                   key=lambda x: x[1]['usage_count'])
-                stats['most_used_path'] = {
-                    'id': most_used_path[0],
-                    'usage_count': most_used_path[1]['usage_count']
-                }
-            
-            # 质量分布
-            qualities = [path_data['quality'] for path_data in self.backbone_paths.values()]
-            stats['average_quality'] = sum(qualities) / len(qualities)
-            stats['min_quality'] = min(qualities)
-            stats['max_quality'] = max(qualities)
-            
-            # 路径类型统计
-            loading_to_unloading = len([p for p in self.backbone_paths.keys() if 'L' in p and 'U' in p])
-            loading_to_parking = len([p for p in self.backbone_paths.keys() if 'L' in p and 'P' in p])
-            unloading_to_parking = len([p for p in self.backbone_paths.keys() if 'U' in p and 'P' in p])
-            
-            stats['path_type_distribution'] = {
-                'loading_to_unloading': loading_to_unloading,
-                'loading_to_parking': loading_to_parking,
-                'unloading_to_parking': unloading_to_parking
-            }
-        
-        return stats
-    
-    def get_path_info(self, path_id):
-        """获取指定路径的详细信息"""
-        if path_id not in self.backbone_paths:
-            return None
-        
-        path_data = self.backbone_paths[path_id]
-        
-        return {
-            'id': path_data['id'],
-            'start_point': {
-                'type': path_data['start_point']['type'],
-                'id': path_data['start_point']['id'],
-                'position': path_data['start_point']['position']
-            },
-            'end_point': {
-                'type': path_data['end_point']['type'],
-                'id': path_data['end_point']['id'],
-                'position': path_data['end_point']['position']
-            },
-            'length': path_data['length'],
-            'quality': path_data['quality'],
-            'usage_count': path_data['usage_count'],
-            'path_points': len(path_data['path'])
-        }
-    
-    def list_all_paths(self):
-        """列出所有骨干路径的基本信息"""
-        paths_info = []
-        
-        for path_id, path_data in self.backbone_paths.items():
-            paths_info.append({
-                'id': path_id,
-                'start': f"{path_data['start_point']['type']}_{path_data['start_point']['id']}",
-                'end': f"{path_data['end_point']['type']}_{path_data['end_point']['id']}",
-                'length': round(path_data['length'], 1),
-                'quality': round(path_data['quality'], 2),
-                'usage': path_data['usage_count']
-            })
-        
-        # 按使用次数排序
-        paths_info.sort(key=lambda x: x['usage'], reverse=True)
-        
-        return paths_info
-    
     # 兼容原始接口的方法
     @property
     def paths(self):
@@ -602,20 +840,72 @@ class SimplifiedBackbonePathNetwork:
     def connections(self):
         """兼容原始接口 - 返回空字典"""
         return {}
-    
-    def find_nearest_connection_optimized(self, position, max_distance=5.0, max_candidates=5):
-        """兼容原始接口 - 简化实现"""
-        # 在简化版本中，不再需要连接点概念
-        # 返回None表示没有找到连接点
-        return None
-    
-    def find_accessible_points(self, position, rrt_planner, max_candidates=5, 
-                            sampling_step=10, max_distance=20.0):
-        """兼容原始接口 - 简化实现"""
-        # 在简化版本中，不再需要可达点概念
-        # 返回空列表
-        return []
+    def debug_network_status(self):
+        """调试网络状态"""
+        print("=== 骨干网络调试信息 ===")
+        print(f"骨干路径数量: {len(self.backbone_paths)}")
+        
+        for path_id, path_data in self.backbone_paths.items():
+            print(f"路径 {path_id}:")
+            print(f"  起点: {path_data['start_point']['type']}_{path_data['start_point']['id']}")
+            print(f"  终点: {path_data['end_point']['type']}_{path_data['end_point']['id']}")
+            print(f"  路径长度: {len(path_data.get('path', []))} 个点")
+            print(f"  接口数量: {len(self.path_interfaces.get(path_id, []))}")
+        
+        print(f"\n接口总数: {len(self.backbone_interfaces)}")
+        print(f"特殊点数量:")
+        print(f"  装载点: {len(self.special_points.get('loading', []))}")
+        print(f"  卸载点: {len(self.special_points.get('unloading', []))}")
+        
+        # 显示到目标的路径索引
+        print(f"\n路径到目标索引:")
+        for target_key, paths in self.paths_to_target.items():
+            print(f"  {target_key}: {len(paths)} 条路径")
 
+    def debug_find_interface(self, position, target_type, target_id, max_distance=50):
+        """调试接口查找过程"""
+        print(f"\n=== 调试接口查找 ===")
+        print(f"当前位置: {position}")
+        print(f"目标: {target_type}_{target_id}")
+        
+        # 1. 检查能到达目标的骨干路径
+        target_paths = self.find_paths_to_target(target_type, target_id)
+        print(f"能到达目标的路径数量: {len(target_paths)}")
+        for path_data in target_paths:
+            print(f"  路径: {path_data['id']}")
+        
+        if not target_paths:
+            print("❌ 没有找到到目标的骨干路径！")
+            return None
+        
+        # 2. 查找附近的接口
+        nearby_interfaces = self._find_nearby_interfaces(position, max_distance)
+        print(f"附近接口数量: {len(nearby_interfaces)}")
+        
+        if not nearby_interfaces:
+            print("❌ 没有找到附近的接口！")
+            return None
+        
+        # 3. 筛选能到达目标的接口
+        candidate_interfaces = []
+        for interface_id in nearby_interfaces:
+            interface = self.backbone_interfaces[interface_id]
+            print(f"检查接口: {interface_id}")
+            print(f"  骨干路径: {interface.backbone_path_id}")
+            print(f"  是否可用: {interface.is_available()}")
+            
+            # 检查接口是否在能到达目标的路径上
+            path_match = any(path_data['id'] == interface.backbone_path_id for path_data in target_paths)
+            print(f"  路径匹配: {path_match}")
+            
+            if path_match and interface.is_available():
+                candidate_interfaces.append(interface)
+                print(f"  ✅ 接口可用")
+            else:
+                print(f"  ❌ 接口不可用")
+        
+        print(f"候选接口数量: {len(candidate_interfaces)}")
+        return candidate_interfaces
 
 # 保持向后兼容性
 OptimizedBackbonePathNetwork = SimplifiedBackbonePathNetwork

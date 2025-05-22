@@ -27,6 +27,14 @@ class Constraint:
     time_step: float
     constraint_type: str = 'vertex'
 
+@dataclass
+class InterfaceConstraint:
+    """接口约束条件"""
+    agent_id: str
+    interface_id: str
+    time_window: Tuple[float, float]
+    constraint_type: str = 'interface_occupation'
+
 class SimplifiedECBSSolver:
     """简化的ECBS求解器 - 适配骨干路径系统"""
     
@@ -174,13 +182,14 @@ class OptimizedTrafficManager:
     def __init__(self, env, backbone_network=None):
         self.env = env
         self.backbone_network = backbone_network
-        
-        # 简化的ECBS求解器
         self.ecbs_solver = SimplifiedECBSSolver(env, backbone_network)
         
         # 路径预留表
-        self.active_paths = {}  # {vehicle_id: path}
-        self.path_reservations = {}  # {(x, y, t): [vehicle_ids]}
+        self.active_paths = {}
+        self.path_reservations = {}
+        
+        # 接口预留表
+        self.interface_reservations = {}  # {interface_id: [(vehicle_id, time_window)]}
         
         # 冲突检测参数
         self.safety_distance = 8.0
@@ -192,10 +201,10 @@ class OptimizedTrafficManager:
             'conflicts_resolved': 0,
             'ecbs_calls': 0,
             'resolution_time': 0,
-            'backbone_conflicts': 0,  # 骨干路径冲突数
-            'access_conflicts': 0     # 接入路径冲突数
+            'backbone_conflicts': 0,
+            'access_conflicts': 0,
+            'interface_conflicts': 0  # 新增接口冲突统计
         }
-        
         print("初始化优化的交通管理器")
     
     def set_backbone_network(self, backbone_network):
@@ -256,40 +265,110 @@ class OptimizedTrafficManager:
                 return True
         
         return False
+    def register_vehicle_path_with_interface(self, vehicle_id, path, start_time=0, 
+                                           speed=1.0, interface_info=None):
+        """注册包含接口信息的车辆路径"""
+        success = self.register_vehicle_path(vehicle_id, path, start_time, speed)
+        
+        if success and interface_info:
+            # 注册接口使用
+            interface_id = interface_info.get('interface_id')
+            if interface_id:
+                access_time = interface_info.get('access_time', start_time)
+                duration = interface_info.get('duration', 60)
+                
+                if interface_id not in self.interface_reservations:
+                    self.interface_reservations[interface_id] = []
+                
+                self.interface_reservations[interface_id].append({
+                    'vehicle_id': vehicle_id,
+                    'time_window': (access_time, access_time + duration),
+                    'path_structure': interface_info
+                })
+        
+        return success
     
+    def detect_interface_conflicts(self, vehicle_paths):
+        """检测接口使用冲突"""
+        interface_conflicts = []
+        
+        # 按接口分组检查冲突
+        interface_usage = defaultdict(list)
+        
+        for vehicle_id, path_data in vehicle_paths.items():
+            structure = path_data.get('structure', {})
+            interface_id = structure.get('interface_id')
+            
+            if interface_id:
+                # 估算到达接口的时间
+                access_length = structure.get('access_length', 0)
+                arrival_time = access_length * 2  # 简化时间估算
+                
+                interface_usage[interface_id].append({
+                    'vehicle_id': vehicle_id,
+                    'arrival_time': arrival_time,
+                    'structure': structure
+                })
+        
+        # 检查每个接口的时间冲突
+        for interface_id, usage_list in interface_usage.items():
+            if len(usage_list) > 1:
+                # 按到达时间排序
+                usage_list.sort(key=lambda x: x['arrival_time'])
+                
+                for i in range(len(usage_list) - 1):
+                    current = usage_list[i]
+                    next_vehicle = usage_list[i + 1]
+                    
+                    # 检查时间窗口重叠
+                    time_gap = next_vehicle['arrival_time'] - current['arrival_time']
+                    if time_gap < 30:  # 30秒的最小间隔
+                        conflict = Conflict(
+                            agent1=current['vehicle_id'],
+                            agent2=next_vehicle['vehicle_id'],
+                            location=self._get_interface_position(interface_id),
+                            time_step=current['arrival_time'],
+                            conflict_type='interface_occupation',
+                            severity=2.0  # 接口冲突严重性较高
+                        )
+                        interface_conflicts.append(conflict)
+                        self.stats['interface_conflicts'] += 1
+        
+        return interface_conflicts
+    
+    def _get_interface_position(self, interface_id):
+        """获取接口位置"""
+        if (self.backbone_network and 
+            interface_id in self.backbone_network.backbone_interfaces):
+            interface = self.backbone_network.backbone_interfaces[interface_id]
+            return (interface.position[0], interface.position[1])
+        return (0, 0)
+
     def detect_conflicts(self, paths):
-        """检测路径集合中的冲突"""
+        """增强的冲突检测 - 包含接口冲突"""
         conflicts = []
         
         if len(paths) < 2:
             return conflicts
         
+        # 1. 原有的路径冲突检测
         agents = list(paths.keys())
-        
-        # 两两检查车辆路径
         for i in range(len(agents)):
             for j in range(i + 1, len(agents)):
                 agent1, agent2 = agents[i], agents[j]
                 path1, path2 = paths[agent1], paths[agent2]
                 
-                # 检测顶点冲突
                 vertex_conflicts = self._detect_vertex_conflicts(agent1, path1, agent2, path2)
                 conflicts.extend(vertex_conflicts)
                 
-                # 检测边冲突
                 edge_conflicts = self._detect_edge_conflicts(agent1, path1, agent2, path2)
                 conflicts.extend(edge_conflicts)
         
-        self.stats['conflicts_detected'] += len(conflicts)
+        # 2. 接口冲突检测
+        interface_conflicts = self.detect_interface_conflicts(paths)
+        conflicts.extend(interface_conflicts)
         
-        # 分类冲突类型
-        for conflict in conflicts:
-            conflict_location = conflict.location
-            if self._is_backbone_location(conflict_location):
-                self.stats['backbone_conflicts'] += 1
-                conflict.severity *= 1.5  # 骨干路径冲突更严重
-            else:
-                self.stats['access_conflicts'] += 1
+        self.stats['conflicts_detected'] += len(conflicts)
         
         return conflicts
     
