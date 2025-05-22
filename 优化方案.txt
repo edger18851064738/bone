@@ -1,904 +1,503 @@
-为了使优化后的VehicleScheduler和ECBSVehicleScheduler类完全发挥作用，以下组件需要进行相应修改：
-1. TrafficManager 修改
-TrafficManager类需要更新以支持保留骨干网络结构的冲突解决：
-pythondef resolve_conflicts(self, paths, backbone_network=None, path_structures=None):
-    """
-    使用ECBS风格的约束树搜索解决冲突，保留骨干网络结构
-    
-    Args:
-        paths: 初始路径字典 {vehicle_id: path}
-        backbone_network: 骨干网络对象(可选)
-        path_structures: 路径结构信息 {vehicle_id: structure_dict}
-        
-    Returns:
-        dict: 无冲突的路径字典，如果无法解决则返回None
-    """
-    # 初始化约束树根节点
-    root = ConstraintTreeNode(
-        constraints=[],
-        solution=paths.copy(),
-        cost=self._calculate_solution_cost(paths)
-    )
-    
-    # 保存路径结构信息 - 新增
-    self.path_structures = path_structures or {}
-    self.backbone_network = backbone_network
-    
-    # 检测初始冲突
-    root.conflicts = self.detect_conflicts(root.solution)
-    root.conflict_count = len(root.conflicts)
-    
-    # 初始化搜索
-    self.open_list = [root]
-    self.focal_list = [root]
-    
-    # 最大迭代次数
-    max_iterations = 1000
-    iterations = 0
-    
-    # ECBS搜索
-    while self.open_list and iterations < max_iterations:
-        iterations += 1
-        
-        # 从focal list中获取冲突最少的节点
-        current = self._get_best_node()
-        
-        # 检查冲突
-        if not current.conflicts:
-            # 如果无冲突，找到解决方案
-            return current.solution
-        
-        # 选择第一个冲突
-        conflict = current.conflicts[0]
-        
-        # 为两个车辆生成约束
-        constraint1 = self._generate_constraint(conflict.agent1, conflict)
-        constraint2 = self._generate_constraint(conflict.agent2, conflict)
-        
-        # 创建子节点并添加到搜索树
-        for constraint in [constraint1, constraint2]:
-            # 创建子节点
-            child = self._create_child_node(current, constraint)
-            
-            if child:
-                # 添加到open list
-                heapq.heappush(self.open_list, child)
-                
-                # 更新focal list
-                self._update_focal_list()
-    
-    # 如果达到最大迭代次数，返回找到的最佳解决方案
-    return self._get_best_solution()
+露天矿多车协同调度系统优化方案
+我的代码现在集成的非常散。这是我的露天矿多车协同调度系统的一个初始版本。载入地图后通过RRT.py的双向混合rrt路径规划器为地图设计骨架参考路径，后续车辆通过path_planner在从某起点前往某终点时导航前往对应骨架路径，然后整体路径变成前往骨架路径的路径+剩余骨架路径；调度层面系统可以调度车辆从任意特殊点到另一个特殊点（包括多卸载点，多装载点，多停车点）；冲突消解层面系统通过ecbs算法解决冲突并实现系统的高效调度。请根据我的思路分析现有问题，给出一个优化整个系统的顺序框架
+1. backbone_network.py（骨干路径网络）
+主要任务：
 
-def _apply_constraint(self, agent_id, constraint, solution):
-    """
-    应用约束并重新规划路径，保留骨干网络结构
-    
-    Args:
-        agent_id: 车辆ID
-        constraint: 约束对象
-        solution: 当前解决方案
-        
-    Returns:
-        list or None: 满足约束的新路径，如果无法满足则返回None
-    """
-    # 获取当前路径
-    current_path = solution[agent_id]
-    
-    if not current_path or len(current_path) < 2:
-        return None
-        
-    # 获取起点和终点
-    start = current_path[0]
-    goal = current_path[-1]
-    
-    # 获取路径结构信息 - 新增
-    path_structure = self.path_structures.get(agent_id, {})
-    
-    # 根据约束类型处理
-    if constraint.constraint_type in ["vertex", "edge", "connection", "traversal"]:
-        # 获取冲突位置和时间
-        conflict_location = constraint.location
-        conflict_time = constraint.time_step
-        
-        # 如果有骨干网络和路径结构，尝试保留骨干部分
-        if self.backbone_network and path_structure:
-            # 提取路径各部分
-            to_backbone = path_structure.get('to_backbone_path')
-            backbone_path = path_structure.get('backbone_path')
-            from_backbone = path_structure.get('from_backbone_path')
-            
-            # 判断冲突在哪个部分
-            conflict_part = None
-            if to_backbone and self._is_conflict_in_path_segment(constraint, to_backbone):
-                conflict_part = "to_backbone"
-            elif backbone_path and self._is_conflict_in_path_segment(constraint, backbone_path):
-                conflict_part = "backbone"
-            elif from_backbone and self._is_conflict_in_path_segment(constraint, from_backbone):
-                conflict_part = "from_backbone"
-            
-            # 只重新规划冲突部分
-            if conflict_part == "to_backbone" and backbone_path:
-                # 重新规划到骨干网络的路径
-                entry_point = path_structure.get('entry_point')
-                if entry_point and entry_point.get('position'):
-                    # 创建临时检查函数，在规划时避开约束位置
-                    def custom_collision_checker(x, y, theta):
-                        # 检查是否接近约束位置
-                        if constraint.location:
-                            dist = self._calculate_distance((x, y), constraint.location)
-                            if dist < 2.0:  # 安全距离
-                                return False
-                        return True
-                    
-                    # 获取路径规划器
-                    planner = None
-                    if hasattr(self.env, 'path_planner') and self.env.path_planner:
-                        planner = self.env.path_planner
-                    
-                    if planner:
-                        # 保存原有的碰撞检测器
-                        original_checker = None
-                        if hasattr(planner, 'collision_checker'):
-                            original_checker = planner.collision_checker
-                        
-                        # 设置临时检测器
-                        planner.collision_checker = custom_collision_checker
-                        
-                        # 重新规划到骨干网络的路径
-                        new_to_backbone = planner.plan_path(
-                            agent_id, 
-                            start, 
-                            entry_point['position'],
-                            use_backbone=False
-                        )
-                        
-                        # 恢复原有检测器
-                        if original_checker:
-                            planner.collision_checker = original_checker
-                        
-                        if new_to_backbone:
-                            # 合并新路径
-                            complete_path = self._merge_paths(
-                                new_to_backbone,
-                                backbone_path,
-                                from_backbone or []
-                            )
-                            return complete_path
-            
-            elif conflict_part == "from_backbone" and backbone_path:
-                # 重新规划从骨干网络到终点的路径
-                exit_point = path_structure.get('exit_point')
-                if exit_point and exit_point.get('position'):
-                    # 同样的策略，创建临时检查器...
-                    # 获取路径规划器...
-                    # 重新规划从骨干到终点的路径...
-                    # [代码结构与上面类似]
-            
-            elif conflict_part == "backbone":
-                # 尝试找到骨干网络中的替代路径
-                entry_point = path_structure.get('entry_point')
-                exit_point = path_structure.get('exit_point')
-                
-                if entry_point and exit_point and self.backbone_network:
-                    # 尝试查找替代骨干路径
-                    # 获取不经过冲突区域的骨干路径...
-                    # [实现替代骨干路径查找的逻辑]
-        
-        # 如果上面的保留骨干部分的规划失败，回退到完全重新规划
-        if hasattr(self.env, 'path_planner') and self.env.path_planner:
-            path = self.env.path_planner.plan_path(
-                agent_id, 
-                start, 
-                goal,
-                use_backbone=True,  # 仍然使用骨干网络
-                check_conflicts=False
-            )
-            return path
-    
-    # 其他约束类型处理...
-    
-    return None
+管理预计算的关键点之间的最优路径
+生成和维护路径连接点
+提供路径段获取和路径查找功能
+优化路径（平滑、简化）
 
-def _is_conflict_in_path_segment(self, constraint, path_segment):
-    """
-    判断冲突是否在给定的路径段内
-    
-    Args:
-        constraint: 约束对象
-        path_segment: 路径段
-        
-    Returns:
-        bool: 冲突是否在路径段内
-    """
-    if not path_segment or not constraint.location:
-        return False
-    
-    # 对于点冲突，检查是否有点接近约束位置
-    min_dist = float('inf')
-    for point in path_segment:
-        dist = self._calculate_distance(point, constraint.location)
-        min_dist = min(min_dist, dist)
-    
-    # 如果最小距离小于阈值，认为冲突在此路径段
-    return min_dist < 5.0  # 5.0是阈值，可以调整
+优化方案：
 
-def _merge_paths(self, path1, path2, path3):
-    """
-    合并多个路径段，避免重复点
-    
-    Args:
-        path1, path2, path3: 要合并的路径段
-        
-    Returns:
-        list: 合并后的路径
-    """
-    if not path1:
-        if not path2:
-            return path3 or []
-        if not path3:
-            return path2 or []
-        # 合并path2和path3
-        if self._is_same_point(path2[-1], path3[0]):
-            return path2 + path3[1:]
-        return path2 + path3
-    
-    if not path2:
-        if not path3:
-            return path1 or []
-        # 合并path1和path3
-        if self._is_same_point(path1[-1], path3[0]):
-            return path1 + path3[1:]
-        return path1 + path3
-    
-    # 合并所有三段
-    merged = path1[:]
-    if self._is_same_point(path1[-1], path2[0]):
-        merged = merged[:-1] + path2
-    else:
-        merged = merged + path2
-    
-    if path3:
-        if self._is_same_point(merged[-1], path3[0]):
-            merged = merged[:-1] + path3
-        else:
-            merged = merged + path3
-    
-    return merged
-2. PathPlanner 修改
-PathPlanner类需要增强以更好地支持三段式路径规划：
-pythondef plan_path(self, vehicle_id, start, goal, use_backbone=True, check_conflicts=True):
-    """
-    规划从起点到终点的完整路径 - 增强三段规划支持
-    
-    Args:
-        vehicle_id: 车辆ID
-        start: 起点坐标 (x, y, theta)
-        goal: 终点坐标 (x, y, theta)
-        use_backbone: 是否使用主干网络，默认为True
-        check_conflicts: 是否检查路径冲突，默认为True
-        
-    Returns:
-        list or None: 路径点列表，规划失败则返回None
-    """
-    # 检查起点和终点是否相同(考虑误差)
-    if self._is_same_position(start, goal):
-        return [start]
-    
-    # 检查缓存
-    if self.use_cache:
-        cache_key = (self._position_to_tuple(start), self._position_to_tuple(goal))
-        if cache_key in self.route_cache:
-            self.cache_hit_count += 1
-            if self.debug:
-                print(f"[PathPlanner] 使用缓存路径: {cache_key} -> {len(self.route_cache[cache_key])}点")
-            return self.route_cache[cache_key].copy()
-        else:
-            self.cache_miss_count += 1
-    
-    # 使用骨干网络辅助规划
-    if use_backbone and self.backbone_network:
-        path, path_structure = self._plan_structured_path(vehicle_id, start, goal)
-        
-        # 路径验证
-        if path and self.path_validation_enabled and not self._validate_path(path):
-            if self.debug:
-                print(f"[PathPlanner] 骨干网络辅助路径验证失败，尝试直接RRT规划")
-            path = None  # 验证失败，置空，下面尝试直接RRT规划
-        
-        if path:
-            # 保存到缓存
-            if self.use_cache:
-                cache_key = (self._position_to_tuple(start), self._position_to_tuple(goal))
-                self.route_cache[cache_key] = path.copy()
-            
-            # 检查路径冲突
-            if check_conflicts and self.traffic_manager:
-                if self.traffic_manager.check_path_conflicts(vehicle_id, path):
-                    adjusted_path = self.traffic_manager.suggest_path_adjustment(vehicle_id, start, goal)
-                    if adjusted_path:
-                        return adjusted_path
-            
-            return path
-    
-    # 骨干网络规划失败或不使用骨干网络，直接使用RRT规划
-    for attempt in range(self.max_rrt_attempts):
-        direct_path = self._plan_direct_path(start, goal)
-        
-        # 路径验证
-        if direct_path and self.path_validation_enabled and not self._validate_path(direct_path):
-            if self.debug:
-                print(f"[PathPlanner] 直接RRT路径验证失败，尝试重新规划 (尝试 {attempt+1}/{self.max_rrt_attempts})")
-            continue
-        
-        if direct_path:
-            # 保存到缓存
-            if self.use_cache:
-                cache_key = (self._position_to_tuple(start), self._position_to_tuple(goal))
-                self.route_cache[cache_key] = direct_path.copy()
-            
-            # 检查路径冲突
-            if check_conflicts and self.traffic_manager:
-                if self.traffic_manager.check_path_conflicts(vehicle_id, direct_path):
-                    adjusted_path = self.traffic_manager.suggest_path_adjustment(vehicle_id, start, goal)
-                    if adjusted_path:
-                        return adjusted_path
-            
-            return direct_path
-    
-    # 所有尝试都失败
-    if self.debug:
-        print(f"[PathPlanner] 路径规划失败: {start} -> {goal}")
-    return None
+连接点生成优化
 
-def _plan_structured_path(self, vehicle_id, start, goal):
-    """
-    规划具有明确三段结构的路径
-    
-    Args:
-        vehicle_id: 车辆ID
-        start: 起点
-        goal: 终点
-        
-    Returns:
-        tuple: (路径点列表, 路径结构)
-    """
-    # 第1步: 寻找起点和终点附近的骨干网络接入点
-    start_candidates = self.backbone_network.find_accessible_points(
-        start, self.rrt_planner, max_candidates=3
-    )
-    
-    if not start_candidates:
-        if self.debug:
-            print(f"[PathPlanner] 无法从起点 {start} 到达任何骨干路径点")
-        return self._plan_direct_path(start, goal), {'to_backbone_path': None}
-            
-    # 寻找终点附近可通过RRT到达的骨干路径点
-    goal_candidates = self.backbone_network.find_accessible_points(
-        goal, self.rrt_planner, max_candidates=3
-    )
-    
-    if not goal_candidates:
-        if self.debug:
-            print(f"[PathPlanner] 无法从任何骨干路径点到达终点 {goal}")
-        return self._plan_direct_path(start, goal), {'to_backbone_path': None}
-    
-    # 第2步: 遍历可能的组合，找出最佳路径
-    best_path = None
-    best_structure = None
-    best_length = float('inf')
-    
-    for start_point in start_candidates[:2]:  # 限制尝试次数
-        for goal_point in goal_candidates[:2]:
-            # 规划三段路径
-            
-            # a. 从起点到骨干入口点
-            path_to_backbone = self._plan_local_path(
-                start, start_point['position']
-            )
-            if not path_to_backbone:
-                continue
-                
-            # b. 在骨干网络中的路径
-            backbone_path = self._get_backbone_segment(
-                start_point['path_id'],
-                start_point['path_index'],
-                goal_point['path_id'],
-                goal_point['path_index']
-            )
-            if not backbone_path:
-                continue
-                
-            # c. 从骨干出口点到终点
-            path_from_backbone = self._plan_local_path(
-                goal_point['position'], goal
-            )
-            if not path_from_backbone:
-                continue
-            
-            # 合并三段路径
-            complete_path = self._merge_paths(
-                path_to_backbone, backbone_path, path_from_backbone
-            )
-            
-            # 验证完整路径
-            if self.path_validation_enabled and not self._validate_path(complete_path):
-                continue
-            
-            # 计算路径长度
-            path_length = self._calculate_path_length(complete_path)
-            
-            # 如果更短，更新最佳路径
-            if path_length < best_length:
-                best_path = complete_path
-                best_length = path_length
-                best_structure = {
-                    'entry_point': start_point,
-                    'exit_point': goal_point,
-                    'backbone_segment': f"{start_point['path_id']}:{goal_point['path_id']}",
-                    'to_backbone_path': path_to_backbone,
-                    'backbone_path': backbone_path,
-                    'from_backbone_path': path_from_backbone
-                }
-    
-    # 如果找到有效路径，进行平滑处理
-    if best_path and self.path_smoothing_enabled:
-        # 分别平滑三个部分，保留三段式结构
-        if best_structure:
-            smoothed_to_backbone = self._smooth_path(best_structure['to_backbone_path'])
-            smoothed_backbone = best_structure['backbone_path']  # 骨干部分通常已经平滑
-            smoothed_from_backbone = self._smooth_path(best_structure['from_backbone_path'])
-            
-            # 重新合并
-            best_path = self._merge_paths(smoothed_to_backbone, smoothed_backbone, smoothed_from_backbone)
-            
-            # 更新结构信息
-            best_structure['to_backbone_path'] = smoothed_to_backbone
-            best_structure['from_backbone_path'] = smoothed_from_backbone
-        else:
-            best_path = self._smooth_path(best_path)
-    
-    return best_path, best_structure
-3. BackbonePathNetwork 修改
-增强 BackbonePathNetwork 以更好地支持结构化路径规划：
-pythondef find_accessible_points(self, position, rrt_planner, max_candidates=5, sampling_step=10, max_distance=20.0):
-    """
-    查找可通过RRT从当前位置到达的骨干路径点 - 增强版
-    
-    Args:
-        position: 起点位置
-        rrt_planner: RRT路径规划器
-        max_candidates: 最大候选点数
-        sampling_step: 路径采样步长
-        max_distance: 最大搜索距离
-        
-    Returns:
-        list: 可达点信息列表，按距离排序
-    """
+改进_generate_connection_points方法，采用更智能的连接点选择策略
+为连接点添加类型属性（入口/出口/中间点）以便更好地进行路径规划
+
+
+路径优化改进
+
+增强_optimize_path和_smooth_path函数，使用更高级的平滑算法
+添加路径重采样功能，确保路径点分布更均匀
+
+
+路径结构管理
+
+增加路径层次结构，便于路由查询
+实现更高效的路径索引，加快最近点查找
+
+
+路径质量评估
+
+添加路径质量评分系统，考虑转弯次数、平滑度等
+基于质量评分优先选择更好的路径
+
+
+路径可视化辅助
+
+增加更多用于调试的可视化属性
+添加路径导出/导入功能
+
+
+
+python# backbone_network.py优化核心示例
+def find_accessible_points(self, position, rrt_planner, max_candidates=5, sampling_step=10, max_distance=20.0):
+    """优化版本，先检查连接点，然后使用空间索引加速搜索"""
     accessible_points = []
     
-    # 首先检查连接点 - 更好的入口点
-    connections = self.connections.copy()
-    for conn_id, conn_data in connections.items():
-        conn_pos = conn_data['position']
-        distance = self._calculate_distance(position, conn_pos)
-        
-        # 如果距离在阈值内，检查是否可达
-        if distance < max_distance:
-            if rrt_planner.is_path_possible(position, conn_pos):
-                # 创建详细的连接点信息
-                path_id = None
-                path_index = 0
-                
-                # 查找对应的路径ID和索引
-                if 'paths' in conn_data and conn_data['paths']:
-                    path_id = conn_data['paths'][0]  # 使用第一条相关路径
-                    
-                    # 查找连接点在路径中的索引
-                    if path_id in self.paths:
-                        path = self.paths[path_id]['path']
-                        for i, point in enumerate(path):
-                            if self._is_same_point(point, conn_pos):
-                                path_index = i
-                                break
-                
-                # 添加到可达点列表
-                accessible_points.append({
-                    'conn_id': conn_id,
-                    'path_id': path_id,
-                    'path_index': path_index,
-                    'position': conn_pos,
-                    'distance': distance,
-                    'type': 'connection'
-                })
+    # 使用KD树或网格索引快速找到近邻连接点
+    nearest_connections = self._find_nearest_connections(position, max_distance)
     
-    # 如果连接点不足，再检查路径点
-    if len(accessible_points) < max_candidates:
-        # 遍历所有骨干路径
-        for path_id, path_data in self.paths.items():
-            path = path_data['path']
+    # 优先检查这些连接点是否可达
+    for conn in nearest_connections:
+        if rrt_planner.is_path_possible(position, conn['position']):
+            # 添加详细信息...
+            accessible_points.append({
+                'conn_id': conn['id'],
+                'path_id': self._get_primary_path_id(conn),
+                'path_index': self._find_point_index(conn),
+                'position': conn['position'],
+                'distance': self._calculate_distance(position, conn['position']),
+                'type': 'connection',
+                'quality': self._evaluate_connection_quality(conn)  # 新增：连接点质量评估
+            })
+    
+    # 如果连接点不足，检查路径点...
+    
+    return sorted(accessible_points, key=lambda x: (x['distance'], -x['quality']))
+2. environment.py（环境模块）
+主要任务：
+
+管理网格地图和障碍物
+维护关键点位置（装载点、卸载点、停车区）
+存储车辆信息和状态
+提供环境更新和模拟功能
+
+优化方案：
+
+碰撞检测优化
+
+重构check_collision方法，使用空间哈希或四叉树加速
+分离细粒度碰撞检测和粗粒度碰撞检测
+
+
+车辆管理增强
+
+实现车辆组管理，支持车辆分组操作
+添加车辆状态变化事件通知机制
+
+
+关键点管理
+
+实现关键点分组和区域管理
+添加动态负载均衡能力（根据使用情况自动调整装载/卸载点优先级）
+
+
+环境状态保存/恢复
+
+增强保存/加载功能，支持增量保存
+添加环境状态快照和回滚能力
+
+
+性能监控
+
+添加性能指标收集
+实现负载均衡触发机制
+
+
+
+python# environment.py优化核心示例
+class OptimizedCollisionChecker:
+    """分离的碰撞检测器，使用空间索引加速"""
+    def __init__(self, env):
+        self.env = env
+        self.spatial_index = self._build_spatial_index()
+        
+    def _build_spatial_index(self):
+        """构建空间索引加速碰撞检测"""
+        # 实现四叉树或空间哈希
+        # ...
+        
+    def check_collision(self, position, vehicle_dim=(6, 3)):
+        """优化的碰撞检测算法"""
+        # 1. 快速粗检测
+        if not self._quick_check(position, vehicle_dim):
+            return True  # 肯定碰撞
             
-            # 采样路径点（避免检查过多点）
-            for idx in range(0, len(path), sampling_step):
-                target = path[idx]
-                distance = self._calculate_distance(position, target)
+        # 2. 详细检测
+        return self._detailed_check(position, vehicle_dim)
+3. path_planner.py（路径规划器）
+主要任务：
+
+连接车辆与骨干路径网络
+规划三段式路径（起点→骨干网络→终点）
+提供路径验证、平滑和缓存功能
+
+优化方案：
+
+三段式规划优化
+
+重构_plan_structured_path函数，明确分离三个阶段
+增加骨干段路径选择的智能性，考虑交通流量
+
+
+缓存机制改进
+
+实现更智能的缓存策略（如LRU、优先级缓存）
+添加缓存预热和自动清理机制
+
+
+路径验证增强
+
+改进验证采样策略，关注潜在冲突点
+增加验证结果缓存
+
+
+骨干路径结构分析
+
+改进_analyze_path_structure，更准确地识别骨干部分
+添加路径特征提取功能，用于后续决策
+
+
+路径品质评估
+
+实现路径质量评分系统
+支持多路径方案对比和选择
+
+
+
+python# path_planner.py优化核心示例
+def plan_path(self, vehicle_id, start, goal, use_backbone=True, check_conflicts=True):
+    """优化版本，明确处理阶段和错误恢复"""
+    # 检查缓存（使用更智能的缓存键生成）
+    cache_key = self._generate_cache_key(vehicle_id, start, goal)
+    cached_path = self._check_cache(cache_key)
+    if cached_path:
+        return cached_path
+    
+    try:
+        # 1. 尝试主骨干路径规划
+        if use_backbone and self.backbone_network:
+            path, structure = self._plan_backbone_path(vehicle_id, start, goal)
+            if path and self._validate_path(path):
+                self._add_to_cache(cache_key, path)
+                return path
                 
-                # 如果距离在阈值内，检查是否可达
-                if distance < max_distance and rrt_planner.is_path_possible(position, target):
-                    accessible_points.append({
-                        'conn_id': None,
-                        'path_id': path_id,
-                        'path_index': idx,
-                        'position': target,
-                        'distance': distance,
-                        'type': 'path_point'
-                    })
-                    
-                    # 找到足够多的候选点后停止
-                    if len(accessible_points) >= max_candidates:
-                        break
+        # 2. 尝试备用骨干路径
+        if use_backbone and self.backbone_network:
+            alt_path = self._plan_alternative_backbone_path(vehicle_id, start, goal)
+            if alt_path and self._validate_path(alt_path):
+                self._add_to_cache(cache_key, alt_path)
+                return alt_path
+                
+        # 3. 回退到直接RRT规划
+        direct_path = self._plan_direct_path(start, goal)
+        if direct_path:
+            self._add_to_cache(cache_key, direct_path)
+            return direct_path
             
-            if len(accessible_points) >= max_candidates:
-                break
-    
-    # 按距离排序
-    return sorted(accessible_points, key=lambda x: x['distance'])
+    except Exception as e:
+        self.logger.error(f"Path planning error: {e}")
+        
+    # 4. 最后尝试紧急规划
+    return self._plan_emergency_path(start, goal)
+4. traffic_manager.py（交通管理器）
+主要任务：
 
-def get_path_segment(self, path_id, start_index, end_index):
-    """
-    获取路径的一个段 - 增强版，支持不同路径之间的段
-    
-    Args:
-        path_id (str): 路径ID或路径ID列表(用':'分隔)
-        start_index (int): 起始索引
-        end_index (int): 结束索引
-        
-    Returns:
-        list or None: 路径段点列表，如果路径不存在则返回None
-    """
-    if ':' in path_id:
-        # 多段路径处理
-        path_ids = path_id.split(':')
-        if len(path_ids) != 2:
-            return None
-        
-        start_path_id, end_path_id = path_ids
-        
-        # 获取两条路径
-        if start_path_id not in self.paths or end_path_id not in self.paths:
-            return None
-        
-        start_path = self.paths[start_path_id]['path']
-        end_path = self.paths[end_path_id]['path']
-        
-        # 处理同一路径的情况
-        if start_path_id == end_path_id:
-            return self._get_single_path_segment(start_path_id, start_index, end_index)
-        
-        # 在主干网络中查找路径
-        connecting_paths = self.find_path(start_path_id, end_path_id)
-        
-        if not connecting_paths:
-            return None
-        
-        # 构建完整路径
-        full_path = []
-        
-        # 添加第一段 - 从start_index到路径末尾
-        if start_index < len(start_path):
-            full_path.extend(start_path[start_index:])
-        
-        # 添加中间连接路径 - 跳过第一条路径和最后一条路径
-        for i, conn_path_id in enumerate(connecting_paths[1:-1], 1):
-            if conn_path_id in self.paths:
-                conn_path = self.paths[conn_path_id]['path']
-                # 如果不是第一段，跳过第一个点以避免重复
-                if i > 1:
-                    conn_path = conn_path[1:]
-                full_path.extend(conn_path)
-        
-        # 添加最后一段 - 从路径开始到end_index
-        if end_index < len(end_path):
-            end_segment = end_path[:end_index+1]
-            # 如果不是第一段且第一个点重复，跳过
-            if full_path and self._is_same_point(full_path[-1], end_segment[0]):
-                end_segment = end_segment[1:]
-            full_path.extend(end_segment)
-        
-        return full_path
-    else:
-        # 单一路径处理
-        return self._get_single_path_segment(path_id, start_index, end_index)
+处理车辆流量和冲突
+实现冲突检测和ECBS解决方案
+管理路径预约和交通规则
 
-def _get_single_path_segment(self, path_id, start_index, end_index):
-    """获取单一路径的段"""
-    if path_id not in self.paths:
-        return None
-        
-    path = self.paths[path_id]['path']
-    
-    if not path:
-        return None
-        
-    # 确保索引有效
-    start_index = max(0, min(start_index, len(path) - 1))
-    end_index = max(0, min(end_index, len(path) - 1))
-    
-    # 根据索引大小决定方向
-    if start_index <= end_index:
-        return path[start_index:end_index + 1]
-    else:
-        # 如果起始索引大于结束索引，则需要反转路径段
-        return list(reversed(path[end_index:start_index + 1]))
+优化方案：
 
-def _is_same_point(self, p1, p2, tolerance=0.5):
-    """判断两点是否相同（考虑误差）"""
-    if not p1 or not p2:
+冲突检测分离
+
+将冲突检测逻辑分离为独立类
+按冲突类型分类实现不同检测算法
+
+
+ECBS算法优化
+
+重构ECBS核心算法，提高搜索效率
+优化约束生成和应用策略
+
+
+预约系统增强
+
+改进时空预约表的数据结构
+增加预约冲突预测功能
+
+
+交通规则管理
+
+增强规则表示和应用机制
+添加自适应规则调整功能
+
+
+路径调整策略
+
+实现更智能的路径调整策略
+添加多方案比较和选择机制
+
+
+
+python# traffic_manager.py优化核心示例
+class ConflictDetectionManager:
+    """分离的冲突检测管理器"""
+    def __init__(self):
+        self.detectors = {
+            'vertex': VertexConflictDetector(),
+            'edge': EdgeConflictDetector(),
+            'following': FollowingConflictDetector(),
+            'connection': ConnectionConflictDetector()
+        }
+    
+    def detect_conflicts(self, paths):
+        """集成多种冲突检测器检测冲突"""
+        all_conflicts = []
+        for detector_type, detector in self.detectors.items():
+            conflicts = detector.detect(paths)
+            all_conflicts.extend(conflicts)
+        
+        # 对冲突进行分类和优先级排序
+        return self._prioritize_conflicts(all_conflicts)
+5. vehicle_scheduler.py（车辆调度器）
+主要任务：
+
+创建和管理任务模板
+分配任务给车辆
+处理任务执行和完成
+优化车辆整体调度
+
+优化方案：
+
+任务管理优化
+
+改进任务创建和分配逻辑
+增加动态任务调整能力
+
+
+ECBS调度增强
+
+优化批量任务规划
+改进车辆优先级管理
+
+
+路径结构利用
+
+更好地利用骨干路径结构信息
+添加路径段复用功能
+
+
+任务执行监控
+
+增强任务进度跟踪
+实现更智能的异常处理
+
+
+调度策略优化
+
+实现多目标调度优化
+添加学习性调度策略
+
+
+
+python# vehicle_scheduler.py优化核心示例
+def assign_optimal_mission(self, vehicle_id):
+    """增强版本，多因素考虑的最优任务分配"""
+    if vehicle_id not in self.vehicle_statuses:
         return False
         
-    # 提取坐标
-    x1 = p1[0] if len(p1) > 0 else 0
-    y1 = p1[1] if len(p1) > 1 else 0
-    x2 = p2[0] if len(p2) > 0 else 0
-    y2 = p2[1] if len(p2) > 1 else 0
+    # 多因素评分系统
+    scores = {}
     
-    # 计算距离并判断是否小于容差
-    dist = ((x1 - x2) ** 2 + (y1 - y2) ** 2) ** 0.5
-    return dist < tolerance
-4. GUI相关修改
-需要更新车辆信息面板，在VehicleInfoPanel类中添加以下修改：
-pythondef update_vehicle_info(self, index=None):
-    """更新车辆信息显示 - 增强显示路径结构和点位信息"""
-    # [现有代码保留]...
+    # 获取可能的任务组合
+    task_combinations = self._generate_task_combinations(vehicle_id)
     
-    # 显示首选装载/卸载点
-    if 'preferred_loading_point' in status and status['preferred_loading_point'] is not None:
-        self.values["preferred_loading"] = QLabel(f"装载点 {status['preferred_loading_point'] + 1}")
-    else:
-        self.values["preferred_loading"] = QLabel("无")
+    for combo_id, combo in task_combinations.items():
+        # 计算距离因素
+        distance_score = self._evaluate_distance_factor(vehicle_id, combo)
+        
+        # 计算负载均衡因素
+        balance_score = self._evaluate_load_balance(combo)
+        
+        # 计算优先级因素
+        priority_score = self._evaluate_priority(vehicle_id, combo)
+        
+        # 计算冲突可能性
+        conflict_score = self._evaluate_conflict_potential(vehicle_id, combo)
+        
+        # 综合评分
+        scores[combo_id] = (
+            0.3 * distance_score + 
+            0.2 * balance_score + 
+            0.3 * priority_score + 
+            0.2 * conflict_score
+        )
     
-    if 'preferred_unloading_point' in status and status['preferred_unloading_point'] is not None:
-        self.values["preferred_unloading"] = QLabel(f"卸载点 {status['preferred_unloading_point'] + 1}")
-    else:
-        self.values["preferred_unloading"] = QLabel("无")
-    
-    # 显示当前任务使用的骨干路径
-    if 'current_task' in status and status['current_task']:
-        task_id = status['current_task']
-        if 'tasks' in self.scheduler and task_id in self.scheduler.tasks:
-            task = self.scheduler.tasks[task_id]
-            
-            if hasattr(task, 'path_structure') and task.path_structure:
-                structure = task.path_structure
-                
-                if structure.get('backbone_segment'):
-                    self.values["backbone_path"] = QLabel(structure['backbone_segment'])
-                    
-                    # 显示路径结构详情
-                    path_structure_text = ""
-                    if structure.get('to_backbone_path'):
-                        path_structure_text += f"起点到骨干: {len(structure['to_backbone_path'])}点\n"
-                    if structure.get('backbone_path'):
-                        path_structure_text += f"骨干路径: {len(structure['backbone_path'])}点\n"
-                    if structure.get('from_backbone_path'):
-                        path_structure_text += f"骨干到终点: {len(structure['from_backbone_path'])}点"
-                    
-                    self.path_structure_text.setText(path_structure_text)
-在路径可视化部分，PathGraphicsItem类需要修改以区分路径的不同部分：
-pythonclass PathGraphicsItem(QGraphicsPathItem):
-    """路径图形项 - 优化版，区分不同路径部分"""
-    def __init__(self, path, parent=None, vehicle_id=None, path_structure=None):
-        super().__init__(parent)
-        self.path_data = path
-        self.vehicle_id = vehicle_id
-        self.path_structure = path_structure  # 新增: 路径结构信息
-        self.update_path()
-        
-        # 改进样式 - 根据路径结构使用不同的颜色
-        if path_structure:
-            # 创建复杂路径，显示不同段
-            self.create_structured_path()
-        else:
-            # 使用默认样式 - 现有代码
-            gradient = QLinearGradient(0, 0, 100, 100)
-            
-            # 使用与车辆颜色匹配的渐变
-            if vehicle_id is not None:
-                gradient.setColorAt(0, QColor(0, 190, 255, 220))  # 起点为亮蓝色
-                gradient.setColorAt(1, QColor(255, 100, 100, 220))  # 终点为红色
-            else:
-                gradient.setColorAt(0, QColor(0, 200, 100, 180))  # 起点为绿色
-                gradient.setColorAt(1, QColor(200, 0, 100, 180))  # 终点为紫色
-            
-            # 改进线条样式
-            pen = QPen(gradient, 0.5)  # 增加线宽使路径更明显
-            pen.setStyle(Qt.DashLine)
-            pen.setDashPattern([5, 3])  # 更美观的虚线模式
-            self.setPen(pen)
-        
-        # 设置Z值，确保路径显示在车辆下方
-        self.setZValue(5)
-        
-        # 添加路径点标记以便于调试
-        self.path_points = []
-        self.add_path_point_markers()
-    
-    def create_structured_path(self):
-        """创建结构化路径 - 不同部分使用不同样式"""
-        if not self.path_structure:
-            return
-            
-        # 提取路径各部分
-        to_backbone = self.path_structure.get('to_backbone_path')
-        backbone = self.path_structure.get('backbone_path')
-        from_backbone = self.path_structure.get('from_backbone_path')
-        
-        # 创建路径
-        painter_path = QPainterPath()
-        
-        # 绘制从起点到骨干网络的路径（虚线，亮蓝色）
-        if to_backbone and len(to_backbone) > 0:
-            # 移动到第一个点
-            start_point = to_backbone[0]
-            painter_path.moveTo(start_point[0], start_point[1])
-            
-            # 连接后续点
-            for point in to_backbone[1:]:
-                painter_path.lineTo(point[0], point[1])
-                
-            # 设置样式
-            pen_to_backbone = QPen(QColor(0, 200, 255, 220), 0.5)
-            pen_to_backbone.setStyle(Qt.DashLine)
-            pen_to_backbone.setDashPattern([5, 3])
-            
-            # 创建路径项
-            to_backbone_path = QGraphicsPathItem(painter_path)
-            to_backbone_path.setPen(pen_to_backbone)
-            to_backbone_path.setZValue(5)
-            self.scene().addItem(to_backbone_path)
-            
-            # 重置路径用于绘制骨干部分
-            painter_path = QPainterPath()
-        
-        # 绘制骨干网络路径（实线，粗，绿色）
-        if backbone and len(backbone) > 0:
-            # 移动到第一个点
-            start_point = backbone[0]
-            painter_path.moveTo(start_point[0], start_point[1])
-            
-            # 连接后续点
-            for point in backbone[1:]:
-                painter_path.lineTo(point[0], point[1])
-                
-            # 设置样式
-            pen_backbone = QPen(QColor(50, 180, 50, 220), 1.0)  # 粗一点，更明显
-            
-            # 创建路径项
-            backbone_path = QGraphicsPathItem(painter_path)
-            backbone_path.setPen(pen_backbone)
-            backbone_path.setZValue(5)
-            self.scene().addItem(backbone_path)
-            
-            # 重置路径用于绘制最后部分
-            painter_path = QPainterPath()
-        
-        # 绘制从骨干网络到终点的路径（虚线，红色）
-        if from_backbone and len(from_backbone) > 0:
-            # 移动到第一个点
-            start_point = from_backbone[0]
-            painter_path.moveTo(start_point[0], start_point[1])
-            
-            # 连接后续点
-            for point in from_backbone[1:]:
-                painter_path.lineTo(point[0], point[1])
-                
-            # 设置样式
-            pen_from_backbone = QPen(QColor(255, 100, 100, 220), 0.5)
-            pen_from_backbone.setStyle(Qt.DashLine)
-            pen_from_backbone.setDashPattern([5, 3])
-            
-            # 创建路径项
-            from_backbone_path = QGraphicsPathItem(painter_path)
-            from_backbone_path.setPen(pen_from_backbone)
-            from_backbone_path.setZValue(5)
-            self.scene().addItem(from_backbone_path)
-5. 任务面板修改
-需要添加装载点和卸载点选择功能：
-pythonclass TaskControlPanel(QWidget):
-    """任务控制面板 - 新增特定点位选择功能"""
-    
+    # 选择最佳方案
+    best_combo_id = max(scores, key=scores.get)
+    return self._assign_task_combination(vehicle_id, task_combinations[best_combo_id])
+6. gui.py（用户界面）
+主要任务：
+
+提供交互界面
+可视化环境、车辆和路径
+提供控制和监控功能
+
+优化方案：
+
+界面响应性优化
+
+分离UI更新和业务逻辑
+实现更高效的图形渲染
+
+
+可视化增强
+
+改进路径和车辆的视觉表示
+增加可视化选项和层级控制
+
+
+交互功能增强
+
+添加更直观的控制功能
+实现更详细的状态监控
+
+
+性能监控
+
+添加性能统计和可视化
+实现关键指标监控
+
+
+数据可视化
+
+增加统计图表和分析工具
+支持导出分析数据
+
+
+
+python# gui.py优化核心示例
+class OptimizedGraphicsView(QGraphicsView):
+    """优化的图形视图，提高渲染性能"""
     def __init__(self, parent=None):
         super().__init__(parent)
+        self.setCacheMode(QGraphicsView.CacheBackground)
+        self.setViewportUpdateMode(QGraphicsView.SmartViewportUpdate)
+        self.setRenderHint(QPainter.Antialiasing, True)
         
-        # 创建布局
-        self.layout = QVBoxLayout(self)
-        self.layout.setContentsMargins(10, 10, 10, 10)
-        self.layout.setSpacing(10)
+        # 添加帧率监控
+        self.fps_counter = FPSCounter()
+        self.performance_monitor = PerformanceMonitor()
         
-        # 装载点选择
-        loading_group = QGroupBox("装载点")
-        loading_layout = QVBoxLayout()
+        # 分层渲染控制
+        self.layer_visibility = {
+            'grid': True,
+            'obstacles': True,
+            'backbone': True,
+            'vehicles': True,
+            'paths': True,
+            'labels': True
+        }
+7. RRT.py（RRT规划器）
+主要任务：
+
+实现基于RRT的路径规划算法
+支持不同变体（如双向RRT、RRT*）
+提供采样和扩展策略
+
+优化方案：
+
+算法效率优化
+
+改进采样策略，关注关键区域
+实现更高效的最近点查找
+
+
+扩展策略增强
+
+添加智能扩展方向选择
+实现自适应步长控制
+
+
+约束处理
+
+增强障碍物避免能力
+添加运动学约束支持
+
+
+路径优化
+
+实现后处理优化步骤
+添加路径简化和平滑
+
+
+与骨干网络集成
+
+改进与骨干网络的协作
+添加偏向骨干路径的采样策略
+
+
+
+python# RRT.py优化核心示例
+class EnhancedRRTPlanner(RRTPlanner):
+    """增强版RRT规划器，支持更多特性"""
+    def __init__(self, env, **kwargs):
+        super().__init__(env, **kwargs)
+        # 添加增强功能
+        self.sampling_strategies = {
+            'uniform': self._uniform_sampling,
+            'goal_biased': self._goal_biased_sampling,
+            'obstacle_border': self._obstacle_border_sampling,
+            'backbone_biased': self._backbone_biased_sampling  # 新增：骨干网络偏向采样
+        }
+        self.current_strategy = 'uniform'
         
-        self.loading_points_combo = QComboBox()
-        self.loading_points_combo.setMinimumHeight(25)
-        loading_layout.addWidget(self.loading_points_combo)
-        
-        loading_group.setLayout(loading_layout)
-        self.layout.addWidget(loading_group)
-        
-        # 卸载点选择
-        unloading_group = QGroupBox("卸载点")
-        unloading_layout = QVBoxLayout()
-        
-        self.unloading_points_combo = QComboBox()
-        self.unloading_points_combo.setMinimumHeight(25)
-        unloading_layout.addWidget(self.unloading_points_combo)
-        
-        unloading_group.setLayout(unloading_layout)
-        self.layout.addWidget(unloading_group)
-        
-        # 任务分配按钮
-        button_layout = QHBoxLayout()
-        
-        self.assign_specific_button = QPushButton("分配特定任务")
-        self.assign_specific_button.clicked.connect(self.assign_specific_task)
-        button_layout.addWidget(self.assign_specific_button)
-        
-        self.assign_optimal_button = QPushButton("分配最优任务")
-        self.assign_optimal_button.clicked.connect(self.assign_optimal_task)
-        button_layout.addWidget(self.assign_optimal_button)
-        
-        self.layout.addLayout(button_layout)
-        
-        # 添加空白区
-        self.layout.addStretch()
-    
-    def set_environment(self, env, scheduler):
-        """设置环境和调度器"""
-        self.env = env
-        self.scheduler = scheduler
-        
-        # 更新装载点下拉框
-        self.loading_points_combo.clear()
-        for i, point in enumerate(env.loading_points):
-            self.loading_points_combo.addItem(f"装载点 {i+1} ({point[0]:.1f}, {point[1]:.1f})", i)
-        
-        # 更新卸载点下拉框
-        self.unloading_points_combo.clear()
-        for i, point in enumerate(env.unloading_points):
-            self.unloading_points_combo.addItem(f"卸载点 {i+1} ({point[0]:.1f}, {point[1]:.1f})", i)
-    
-    def assign_specific_task(self):
-        """分配使用特定装载点和卸载点的任务"""
-        if not hasattr(self, 'env') or not hasattr(self, 'scheduler'):
-            return
-        
-        # 获取选中的车辆
-        vehicle_id = self.get_selected_vehicle()
-        if not vehicle_id:
-            return
-        
-        # 获取选中的装载点和卸载点
-        loading_point_id = self.loading_points_combo.currentData()
-        unloading_point_id = self.unloading_points_combo.currentData()
-        
-        # 创建唯一的模板ID
-        template_id = f"specific_mission_{vehicle_id}_{loading_point_id}_{unloading_point_id}"
-        
-        # 创建并分配任务
-        if self.scheduler.create_mission_with_specific_points(template_id, loading_point_id, unloading_point_id):
-            self.scheduler.assign_mission(vehicle_id, template_id)
-    
-    def assign_optimal_task(self):
-        """分配最优任务"""
-        vehicle_id = self.get_selected_vehicle()
-        if not vehicle_id:
-            return
-        
-        self.scheduler.assign_optimal_mission(vehicle_id)
-    
-    def get_selected_vehicle(self):
-        """获取当前选中的车辆"""
-        # 需要实现获取当前选中车辆的逻辑
-        # 可以调用主窗口的方法或使用信号
-        pass
+    def _backbone_biased_sampling(self, goal):
+        """偏向骨干网络的采样策略"""
+        if hasattr(self.env, 'backbone_network') and self.env.backbone_network:
+            if random.random() < 0.4:  # 40%概率使用骨干网络点
+                # 从骨干网络随机选择一个连接点
+                connections = list(self.env.backbone_network.connections.values())
+                if connections:
+                    conn = random.choice(connections)
+                    return conn['position']
+        # 回退到目标偏向采样
+        return self._goal_biased_sampling(goal)
+实施优化的步骤建议
+
+优先级排序
+
+首先优化核心算法（RRT和ECBS）
+然后改进骨干网络和路径规划器
+接着增强调度器和交通管理器
+最后优化界面和可视化
+
+
+增量实施
+
+为每个组件创建测试案例
+每次优化一个方法或功能
+测试确认性能改进后再继续
+
+
+维护文档
+
+为每个优化记录详细注释
+维护API文档
+创建算法流程图
+
+
+性能测试
+
+建立性能基准测试
+跟踪每次优化的性能变化
+定期进行大规模场景测试
+
+
+
+总结
+通过这种逐步优化的方式，您可以在保持现有代码结构的同时，显著提高系统的性能、可维护性和功能。每个组件的优化都是独立的，这样您可以根据需求和资源安排优先级，逐步实现系统升级。
+建议先从核心算法和骨干网络开始优化，因为这些组件对整体性能影响最大，然后再扩展到其他部分。每次优化后进行充分测试，确保系统的稳定性和性能提升。
