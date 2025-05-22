@@ -532,16 +532,27 @@ class SimplifiedVehicleScheduler:
         
         return True
     def _plan_vehicle_path_with_interface(self, vehicle_id, start, goal):
-        """使用接口系统为车辆规划路径"""
+        """使用新接口系统为车辆规划路径"""
         if not self.path_planner:
             return None
         
         try:
             # 使用新的接口系统规划路径
             result = self.path_planner.plan_path(vehicle_id, start, goal, use_backbone=True)
+            
+            if result and isinstance(result, tuple) and len(result) == 2:
+                path, structure = result
+                
+                # 检查是否使用了新的接口系统
+                if structure.get('type') in ['backbone_only', 'interface_assisted']:
+                    print(f"车辆 {vehicle_id} 使用新接口系统: {structure.get('interface_id')}")
+                
+                return result
+            
             return result
+            
         except Exception as e:
-            print(f"车辆 {vehicle_id} 接口路径规划失败: {e}")
+            print(f"车辆 {vehicle_id} 新接口路径规划失败: {e}")
             return None
     
     def _plan_vehicle_path(self, vehicle_id, start, goal):

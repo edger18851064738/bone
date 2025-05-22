@@ -1166,7 +1166,7 @@ class OptimizedMineGUI(QMainWindow):
             )
     
     def generate_backbone_network(self):
-        """生成骨干路径网络"""
+        """生成骨干路径网络 - 更新版本"""
         if not self.env or not self.backbone_network:
             self.log("请先加载环境", "error")
             return
@@ -1174,37 +1174,35 @@ class OptimizedMineGUI(QMainWindow):
         try:
             self.log("正在生成骨干路径网络...")
             
+            # 使用新的接口系统生成
             quality_threshold = self.control_panel.quality_spin.value()
+            interface_spacing = 8  # 使用更小的接口间距
             
             start_time = time.time()
-            success = self.backbone_network.generate_backbone_network(quality_threshold)
+            success = self.backbone_network.generate_backbone_network(
+                quality_threshold=quality_threshold,
+                interface_spacing=interface_spacing
+            )
             generation_time = time.time() - start_time
             
             if success:
+                # 调试新接口系统
+                self.backbone_network.debug_interface_system()
+                
                 # 更新到其他组件
-                self.backbone_network.debug_network_status()
                 self.path_planner.set_backbone_network(self.backbone_network)
                 self.traffic_manager.set_backbone_network(self.backbone_network)
                 self.vehicle_scheduler.set_backbone_network(self.backbone_network)
-                if self.env.vehicles:
-                    test_vehicle_id = list(self.env.vehicles.keys())[0]
-                    test_position = self.env.vehicles[test_vehicle_id]['position']
-                    
-                    # 测试到装载点的接口查找
-                    print(f"\n=== 测试车辆 {test_vehicle_id} 的接口查找 ===")
-                    test_interface = self.backbone_network.find_nearest_interface(
-                        test_position, 'loading', 0, debug=True
-                    )
-                    
-                    if test_interface:
-                        print(f"找到测试接口: {test_interface.interface_id}")
-                    else:
-                        print("❌ 测试接口查找失败")                
+                
+
                 # 在图形视图中显示
                 self.graphics_view.set_backbone_network(self.backbone_network)
                 
-                path_count = len(self.backbone_network.paths)
-                self.log(f"骨干路径网络生成成功 - {path_count} 条路径，耗时 {generation_time:.2f}s", "success")
+                path_count = len(self.backbone_network.backbone_paths)
+                interface_count = len(self.backbone_network.backbone_interfaces)
+                
+                self.log(f"骨干路径网络生成成功 - {path_count} 条路径，"
+                        f"{interface_count} 个接口，耗时 {generation_time:.2f}s", "success")
             else:
                 self.log("骨干路径网络生成失败", "error")
                 

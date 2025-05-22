@@ -232,9 +232,7 @@ class SimplifiedPathPlanner:
         return None, None
     
     def _try_backbone_planning(self, start, goal, attempt):
-        """
-        尝试使用骨干网络规划路径 - 接口系统优化版
-        """
+        """尝试使用骨干网络规划路径 - 更新版本"""
         try:
             # 1. 识别目标点类型
             target_type, target_id = self.backbone_network.identify_target_point(goal)
@@ -248,22 +246,22 @@ class SimplifiedPathPlanner:
                 print(f"目标识别为: {target_type}_{target_id}")
             
             # 2. 使用新的接口系统规划路径
-            complete_path, structure = self.backbone_network.get_path_from_position_to_target_via_interface(
+            complete_path, structure = self.backbone_network.get_complete_path_via_interface(
                 start, target_type, target_id
             )
             
             if complete_path and structure:
                 if self.debug:
-                    print(f"接口系统规划成功: 总长度{len(complete_path)}, "
-                        f"类型{structure.get('type')}, "
-                        f"接口{structure.get('interface_id', 'N/A')}")
+                    print(f"新接口系统规划成功: 总长度{len(complete_path)}, "
+                          f"类型{structure.get('type')}, "
+                          f"接口{structure.get('interface_id', 'N/A')}")
                 return complete_path, structure
             
             return None
             
         except Exception as e:
             if self.debug:
-                print(f"接口系统规划失败: {e}")
+                print(f"新接口系统规划失败: {e}")
             return None
     
     def _direct_planning(self, start, goal, attempt):
