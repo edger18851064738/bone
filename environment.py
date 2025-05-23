@@ -31,7 +31,15 @@ class OpenPitMineEnv:
         
         # 创建网格地图 (0-可通行 1-障碍物)
         self.grid = np.zeros((width, height), dtype=np.uint8)
+        self.backbone_network = None
+        self.vehicle_scheduler = None
+        self.traffic_manager = None
         
+        # 保存的状态数据
+        self._saved_backbone_data = None
+        self._saved_interface_states = None
+        self._saved_scheduler_states = None
+        self._saved_traffic_states = None
         # 关键点位置
         self.loading_points = []     # 装载点 [(x, y, theta), ...]
         self.unloading_points = []   # 卸载点 [(x, y, theta), ...]
@@ -781,129 +789,87 @@ class OpenPitMineEnv:
             return None
 
     def set_backbone_network(self, backbone_network):
-        """设置环境的骨干网络引用"""
+        """设置骨干网络引用"""
         self.backbone_network = backbone_network
-
+    
     def set_vehicle_scheduler(self, scheduler):
-        """设置环境的调度器引用"""
+        """设置车辆调度器引用"""
         self.vehicle_scheduler = scheduler
-
+    
     def set_traffic_manager(self, traffic_manager):
-        """设置环境的交通管理器引用"""
+        """设置交通管理器引用"""
         self.traffic_manager = traffic_manager
     
-    def load_from_file(self, filename):
-        """从文件加载环境 - 包含接口系统状态恢复
-        
-        Args:
-            filename (str): 文件路径
-            
-        Returns:
-            bool: 加载是否成功
-        """
+    def save_to_file(self, filename):
+        """保存环境到文件"""
         try:
-            # 读取文件
-            with open(filename, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-            
-            # 重置环境
-            self.__init__(
-                width=data.get("width", 500),
-                height=data.get("height", 500),
-                grid_resolution=data.get("resolution", 1.0)
-            )
-            
-            # 清空障碍点列表
-            self.obstacle_points = []
-            self.grid = np.zeros((self.width, self.height), dtype=np.uint8)
-            
-            # 加载障碍物
-            for obstacle in data.get("obstacles", []):
-                if "width" in obstacle and "height" in obstacle:
-                    # 旧格式：矩形障碍物
-                    self.add_obstacle(
-                        obstacle["x"],
-                        obstacle["y"],
-                        obstacle["width"],
-                        obstacle["height"]
-                    )
-                else:
-                    # 新格式：散点障碍物
-                    self.add_obstacle_point(obstacle["x"], obstacle["y"])
-            
-            # 加载装载点
-            for point in data.get("loading_points", []):
-                self.add_loading_point(
-                    (point["x"], point["y"], point.get("theta", 0))
-                )
-            
-            # 加载卸载点
-            for point in data.get("unloading_points", []):
-                self.add_unloading_point(
-                    (point["x"], point["y"], point.get("theta", 0))
-                )
-            
-            # 加载停车区
-            for area in data.get("parking_areas", []):
-                self.add_parking_area(
-                    (area["x"], area["y"], area.get("theta", 0)),
-                    area.get("capacity", 5)
-                )
-            
-            # 加载车辆
-            for vehicle in data.get("vehicles", []):
-                success = self.add_vehicle(
-                    vehicle["id"],
-                    (vehicle["x"], vehicle["y"], vehicle.get("theta", 0)),
-                    None,
-                    vehicle.get("type", "dump_truck"),
-                    vehicle.get("max_load", 100)
-                )
-                
-                if success and vehicle["id"] in self.vehicles:
-                    # 恢复车辆状态
-                    self.vehicles[vehicle["id"]].update({
+            # 构建基础数据字典
+            data = {
+                "width": self.width,
+                "height": self.height,
+                "resolution": self.grid_resolution,
+                "obstacles": [{"x": x, "y": y} for x, y in self.obstacle_points],
+                "loading_points": [
+                    {"x": point[0], "y": point[1], "theta": point[2] if len(point) > 2 else 0}
+                    for point in self.loading_points
+                ],
+                "unloading_points": [
+                    {"x": point[0], "y": point[1], "theta": point[2] if len(point) > 2 else 0}
+                    for point in self.unloading_points
+                ],
+                "parking_areas": [
+                    {"x": point[0], "y": point[1], "theta": point[2] if len(point) > 2 else 0}
+                    for point in self.parking_areas
+                ],
+                "vehicles": [
+                    {
+                        "id": vehicle_id,
+                        "x": vehicle["position"][0],
+                        "y": vehicle["position"][1],
+                        "theta": vehicle["position"][2],
+                        "type": vehicle["type"],
+                        "max_load": vehicle["max_load"],
                         "status": vehicle.get("status", "idle"),
                         "load": vehicle.get("load", 0),
                         "completed_cycles": vehicle.get("completed_cycles", 0),
                         "path_structure": vehicle.get("path_structure", {}),
                         "path_index": vehicle.get("path_index", 0),
                         "progress": vehicle.get("progress", 0.0)
-                    })
+                    }
+                    for vehicle_id, vehicle in self.vehicles.items()
+                ],
+                "current_time": self.current_time,
+                "running": self.running,
+                "paused": self.paused
+            }
             
-            # 恢复环境状态
-            self.current_time = data.get("current_time", 0.0)
-            self.running = data.get("running", False)
-            self.paused = data.get("paused", False)
+            # 保存组件状态
+            if self.backbone_network:
+                data["backbone_network"] = self.backbone_network.get_save_data()
             
-            # 保存接口恢复数据，供后续系统组件使用
-            self._saved_backbone_data = data.get("backbone_network")
-            self._saved_interface_states = data.get("interface_states")
-            self._saved_scheduler_states = data.get("scheduler_states")
-            self._saved_traffic_states = data.get("traffic_manager")
+            if self.vehicle_scheduler:
+                data["scheduler_states"] = self.vehicle_scheduler.get_save_data()
             
-            # 显示加载信息
-            save_metadata = data.get("save_metadata", {})
-            if save_metadata:
-                print(f"环境加载成功: {filename}")
-                print(f"- 保存时间: {save_metadata.get('save_time', 'Unknown')}")
-                print(f"- 版本: {save_metadata.get('version', 'Unknown')}")
-                print(f"- 车辆数量: {len(self.vehicles)}")
-                
-                if self._saved_backbone_data:
-                    print(f"- 骨干路径: {self._saved_backbone_data.get('total_paths', 0)} 条")
-                if self._saved_interface_states:
-                    print(f"- 接口状态: {len(self._saved_interface_states)} 个")
+            if self.traffic_manager:
+                data["traffic_manager"] = self.traffic_manager.get_save_data()
             
-            # 通知环境变化
-            self._notify_change()
+            # 添加保存时间戳和版本信息
+            import time
+            data["save_metadata"] = {
+                "timestamp": time.time(),
+                "save_time": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "version": "v1.0_interface_system",
+                "total_vehicles": len(self.vehicles)
+            }
+            
+            # 写入文件
+            with open(filename, 'w', encoding='utf-8') as f:
+                json.dump(data, f, indent=4, ensure_ascii=False)
             
             return True
             
         except Exception as e:
-            print(f"加载环境失败: {str(e)}")
-            import traceback
-            traceback.print_exc()
+            print(f"保存环境失败: {str(e)}")
             return False
 
     def restore_interface_states(self, backbone_network):
@@ -994,3 +960,121 @@ class OpenPitMineEnv:
             bool: 是否运行中
         """
         return self.running and not self.paused
+    def load_from_file(self, filename):
+        """从文件加载环境
+        
+        Args:
+            filename (str): 环境文件路径
+            
+        Returns:
+            bool: 加载是否成功
+        """
+        try:
+            # 读取文件
+            with open(filename, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            
+            # 重置环境
+            self.__init__(
+                width=data.get("width", 500),
+                height=data.get("height", 500),
+                grid_resolution=data.get("resolution", 1.0)
+            )
+            
+            # 清空障碍点列表
+            self.obstacle_points = []
+            self.grid = np.zeros((self.width, self.height), dtype=np.uint8)
+            
+            # 加载障碍物
+            for obstacle in data.get("obstacles", []):
+                if isinstance(obstacle, dict):
+                    x = obstacle.get("x", 0)
+                    y = obstacle.get("y", 0)
+                    if "width" in obstacle and "height" in obstacle:
+                        # 矩形障碍物
+                        self.add_obstacle(x, y, obstacle["width"], obstacle["height"])
+                    else:
+                        # 单点障碍物
+                        self.add_obstacle_point(x, y)
+            
+            # 加载装载点
+            self.loading_points = []
+            for point in data.get("loading_points", []):
+                if isinstance(point, dict):
+                    x = point.get("x", 0)
+                    y = point.get("y", 0)
+                    theta = point.get("theta", 0.0)
+                    self.add_loading_point((x, y, theta))
+                elif isinstance(point, list) and len(point) >= 2:
+                    row, col = point[0], point[1]
+                    theta = 0.0 if len(point) <= 2 else point[2]
+                    self.add_loading_point((col, row, theta))
+            
+            # 加载卸载点
+            self.unloading_points = []
+            for point in data.get("unloading_points", []):
+                if isinstance(point, dict):
+                    x = point.get("x", 0)
+                    y = point.get("y", 0)
+                    theta = point.get("theta", 0.0)
+                    self.add_unloading_point((x, y, theta))
+                elif isinstance(point, list) and len(point) >= 2:
+                    row, col = point[0], point[1]
+                    theta = 0.0 if len(point) <= 2 else point[2]
+                    self.add_unloading_point((col, row, theta))
+            
+            # 加载停车区
+            self.parking_areas = []
+            for point in data.get("parking_areas", []):
+                if isinstance(point, dict):
+                    x = point.get("x", 0)
+                    y = point.get("y", 0)
+                    theta = point.get("theta", 0.0)
+                    capacity = point.get("capacity", 5)
+                    self.add_parking_area((x, y, theta), capacity)
+                elif isinstance(point, list) and len(point) >= 2:
+                    row, col = point[0], point[1]
+                    theta = 0.0 if len(point) <= 2 else point[2]
+                    capacity = 5 if len(point) <= 3 else point[3]
+                    self.add_parking_area((col, row, theta), capacity)
+            
+            # 加载车辆信息
+            self.vehicles = {}
+            for vehicle in data.get("vehicles", []):
+                if isinstance(vehicle, dict):
+                    vehicle_id = str(vehicle.get("id", f"v_{len(self.vehicles) + 1}"))
+                    x = vehicle.get("x", 0)
+                    y = vehicle.get("y", 0)
+                    theta = vehicle.get("theta", 0.0)
+                    v_type = vehicle.get("type", "dump_truck")
+                    max_load = vehicle.get("max_load", 100)
+                    
+                    # 添加车辆并设置其他属性
+                    self.add_vehicle(vehicle_id, (x, y, theta), None, v_type, max_load)
+                    if vehicle_id in self.vehicles:
+                        self.vehicles[vehicle_id].update({
+                            "status": vehicle.get("status", "idle"),
+                            "load": vehicle.get("load", 0),
+                            "completed_cycles": vehicle.get("completed_cycles", 0),
+                            "path_structure": vehicle.get("path_structure", {}),
+                            "path_index": vehicle.get("path_index", 0),
+                            "progress": vehicle.get("progress", 0.0)
+                        })
+            
+            # 加载组件状态
+            self._saved_backbone_data = data.get("backbone_network")
+            self._saved_scheduler_states = data.get("scheduler_states")
+            self._saved_traffic_states = data.get("traffic_manager")
+            
+            # 设置环境状态
+            self.current_time = data.get("current_time", 0.0)
+            self.running = data.get("running", False)
+            self.paused = data.get("paused", False)
+            
+            return True
+            
+        except Exception as e:
+            print(f"加载环境失败: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            return False

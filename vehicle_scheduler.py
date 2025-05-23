@@ -920,7 +920,19 @@ class OptimizedVehicleScheduler:
             print(f"任务 {task.task_id} 路径规划失败: {e}")
         
         return False
-    
+    def update_backbone_visualization(self):
+        """更新骨干路径可视化"""
+        if self.backbone_visualizer:
+            self.removeItem(self.backbone_visualizer)
+        
+        if self.backbone_network and self.show_options['backbone']:
+            self.backbone_visualizer = BackbonePathVisualization(self.backbone_network)
+            self.addItem(self.backbone_visualizer)
+    def set_backbone_network(self, backbone_network):
+        """设置骨干路径网络"""
+        self.backbone_network = backbone_network
+        self.update_backbone_visualization()
+        self.update_interface_display()    
     def update(self, time_delta: float):
         """更新调度器状态"""
         current_time = time.time()
