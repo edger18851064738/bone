@@ -3,6 +3,7 @@ import time
 import threading
 import numpy as np
 from collections import defaultdict, OrderedDict
+from typing import Dict, List, Tuple, Optional, Any  # 添加缺失的导入
 from RRT import OptimizedRRTPlanner
 
 class BackboneInterface:
@@ -533,41 +534,39 @@ class SimplifiedBackbonePathNetwork:
             self.interface_spatial_index[grid_key].append(interface_id)
     
     def find_nearest_interface(self, position, target_type, target_id, max_distance=50, debug=True):
-        """
-        找到最近的可用骨干接口 - 简化版本
-        """
-        if debug:
-            print(f"\n🔍 查找从 {position} 到 {target_type}_{target_id} 的接口")
+        """找到最近的可用骨干接口 - 实现完整版本"""
+        if not self.backbone_network:
+            if debug:
+                print("骨干网络不可用")
+            return None
         
-        # 1. 找到所有通向目标的骨干路径
+        if debug:
+            print(f"🔍 查找从 {position} 到 {target_type}_{target_id} 的接口")
+        
+        # 找到所有通向目标的骨干路径
         target_key = (target_type, target_id)
-        target_paths = self.paths_to_target.get(target_key, [])
+        target_paths = self.backbone_network.paths_to_target.get(target_key, [])
         
         if not target_paths:
             if debug:
                 print(f"❌ 没有找到通向 {target_type}_{target_id} 的骨干路径")
             return None
         
-        if debug:
-            print(f"📍 找到 {len(target_paths)} 条通向目标的骨干路径")
-        
-        # 2. 收集这些路径上的所有可用接口
+        # 收集候选接口
         candidate_interfaces = []
         
         for path_data in target_paths:
             path_id = path_data['id']
             
-            if path_id not in self.path_interfaces:
+            if path_id not in self.backbone_network.path_interfaces:
                 continue
                 
-            for interface_id in self.path_interfaces[path_id]:
-                interface = self.backbone_interfaces[interface_id]
+            for interface_id in self.backbone_network.path_interfaces[path_id]:
+                interface = self.backbone_network.backbone_interfaces[interface_id]
                 
-                # 检查接口是否可用
                 if not interface.is_available():
                     continue
                 
-                # 计算距离
                 distance = self._calculate_distance(position, interface.position)
                 if distance <= max_distance:
                     candidate_interfaces.append((interface, distance, path_id))
@@ -577,47 +576,21 @@ class SimplifiedBackbonePathNetwork:
                 print(f"❌ 在距离 {max_distance} 内没有找到可用接口")
             return None
         
+        # 选择最佳接口
+        best_interface = min(candidate_interfaces, key=lambda x: x[1])[0]
+        
         if debug:
-            print(f"🎯 找到 {len(candidate_interfaces)} 个候选接口")
-        
-        # 3. 选择最佳接口
-        best_interface = None
-        best_score = -float('inf')
-        
-        for interface, distance, path_id in candidate_interfaces:
-            # 计算到目标的剩余路径长度
-            backbone_path = self.backbone_paths[path_id]['path']
-            remaining_length = len(backbone_path) - interface.path_index
-            
-            # 综合评分：距离越近越好，剩余路径越长越好，可达性越高越好
-            distance_score = 100 / (distance + 1)
-            remaining_score = remaining_length * 0.5
-            accessibility_score = interface.accessibility_score * 20
-            quality_score = interface.last_quality_score * 10
-            
-            total_score = distance_score + remaining_score + accessibility_score + quality_score
-            
-            if debug:
-                print(f"   接口 {interface.interface_id}: 距离={distance:.1f}, "
-                      f"剩余={remaining_length}, 可达性={interface.accessibility_score:.2f}, "
-                      f"评分={total_score:.1f}")
-            
-            if total_score > best_score:
-                best_score = total_score
-                best_interface = interface
-        
-        if best_interface and debug:
-            print(f"✅ 选择接口: {best_interface.interface_id} (评分: {best_score:.1f})")
+            print(f"✅ 选择接口: {best_interface.interface_id}")
         
         return best_interface
     
-    def get_complete_path_via_interface_enhanced(self, start, target_type, target_id, 
-                                               rrt_hints=None):
-        """增强版路径获取 - 集成RRT提示"""
-        self.path_cache_stats['total_requests'] += 1
+    def get_complete_path_via_interface_enhanced(self, start, target_type, target_id, rrt_hints=None):
+        """增强版路径获取 - 实现完整版本"""
+        if not self.backbone_network:
+            return None
         
         # 获取基础路径
-        base_result = self.get_path_from_position_to_target_via_interface(
+        base_result = self.backbone_network.get_path_from_position_to_target_via_interface(
             start, target_type, target_id
         )
         
@@ -632,33 +605,23 @@ class SimplifiedBackbonePathNetwork:
             if optimized_path:
                 path = optimized_path
                 structure['rrt_optimized'] = True
-                self.path_cache_stats['quality_improvements'] += 1
-        
-        # 更新接口统计
-        interface_id = structure.get('interface_id')
-        if interface_id in self.backbone_interfaces:
-            interface = self.backbone_interfaces[interface_id]
-            if hasattr(interface, 'update_rrt_statistics'):
-                quality = self._evaluate_path_quality(path)
-                interface.update_rrt_statistics(0.1, quality, False)  # 假设时间
         
         return path, structure
+    
     
     def _apply_rrt_hints(self, path, hints):
         """应用RRT提示优化路径"""
         try:
-            # 这里可以应用RRT规划器的优化建议
             if 'smoothing_suggested' in hints:
                 return self._smooth_path_with_rrt(path)
             
             if 'density_adjustment' in hints:
                 return self._adjust_path_density_smart(path, hints['target_density'])
-            
+        
         except Exception as e:
             print(f"RRT提示应用失败: {e}")
         
         return path
-    
     def _smooth_path_with_rrt(self, path):
         """使用RRT优化器平滑路径"""
         if self.rrt_planner_ref and hasattr(self.rrt_planner_ref, '_adaptive_smoothing'):
@@ -680,9 +643,11 @@ class SimplifiedBackbonePathNetwork:
             'interface_targets': []
         }
         
+        if not self.backbone_network:
+            return guidance
+        
         # 添加相关的采样区域
-        for region_id, region in self.sampling_regions.items():
-            # 计算与起终点的相关性
+        for region_id, region in self.backbone_network.sampling_regions.items():
             relevance = self._calculate_region_relevance(region, start, goal)
             
             if relevance > 0.3:
@@ -695,17 +660,6 @@ class SimplifiedBackbonePathNetwork:
         # 排序并限制数量
         guidance['priority_regions'].sort(key=lambda x: x['relevance'], reverse=True)
         guidance['priority_regions'] = guidance['priority_regions'][:10]
-        
-        # 添加骨干路径提示
-        target_type, target_id = self.identify_target_point(goal)
-        if target_type:
-            relevant_paths = self.find_paths_to_target(target_type, target_id)
-            for path_data in relevant_paths[:3]:  # 最多3条提示路径
-                guidance['backbone_hints'].append({
-                    'path_id': path_data['id'],
-                    'quality': path_data.get('quality', 0.5),
-                    'length': path_data.get('length', 0)
-                })
         
         return guidance
     
@@ -721,16 +675,12 @@ class SimplifiedBackbonePathNetwork:
         direct_distance = math.sqrt((goal[0] - start[0])**2 + (goal[1] - start[1])**2)
         
         # 相关性基于区域是否在合理的路径范围内
-        max_detour = direct_distance * 1.5  # 允许50%的绕行
+        max_detour = direct_distance * 1.5
         total_distance = dist_to_start + dist_to_goal
         
         if total_distance <= max_detour:
-            # 基础相关性
             base_relevance = 1.0 - (total_distance - direct_distance) / (max_detour - direct_distance)
-            
-            # 区域优先级加权
             priority_weight = region.get('priority', 1.0)
-            
             return base_relevance * priority_weight
         
         return 0.0

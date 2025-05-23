@@ -1315,7 +1315,131 @@ class OptimizedOpenPitMineEnv:
             
         except Exception as e:
             logger.error(f"环境关闭失败: {e}")
-
+    def validate_environment(self):
+        """验证环境配置的有效性"""
+        issues = []
+        
+        # 检查基本配置
+        if self.width <= 0 or self.height <= 0:
+            issues.append("环境尺寸无效")
+        
+        # 检查车辆位置
+        for vehicle_id, vehicle in self.vehicles.items():
+            pos = vehicle.position
+            if (pos[0] < 0 or pos[0] >= self.width or 
+                pos[1] < 0 or pos[1] >= self.height):
+                issues.append(f"车辆 {vehicle_id} 位置超出边界")
+        
+        # 检查特殊点位置
+        for i, point in enumerate(self.loading_points):
+            if (point[0] < 0 or point[0] >= self.width or 
+                point[1] < 0 or point[1] >= self.height):
+                issues.append(f"装载点 {i} 位置超出边界")
+        
+        for i, point in enumerate(self.unloading_points):
+            if (point[0] < 0 or point[0] >= self.width or 
+                point[1] < 0 or point[1] >= self.height):
+                issues.append(f"卸载点 {i} 位置超出边界")
+        
+        return issues
+    
+    def get_environment_summary(self):
+        """获取环境摘要信息"""
+        return {
+            'dimensions': f"{self.width}x{self.height}",
+            'vehicles': len(self.vehicles),
+            'loading_points': len(self.loading_points),
+            'unloading_points': len(self.unloading_points),
+            'parking_areas': len(getattr(self, 'parking_areas', [])),
+            'obstacles': len(self.obstacle_points),
+            'state': self.state.value if hasattr(self, 'state') else 'unknown',
+            'components': len(self.component_manager.components) if hasattr(self, 'component_manager') else 0
+        }
+    
+    def force_vehicle_position(self, vehicle_id: str, position: Tuple[float, float, float]):
+        """强制设置车辆位置（调试用）"""
+        if vehicle_id not in self.vehicles:
+            return False
+        
+        x, y, theta = position
+        
+        # 验证位置
+        if x < 0 or x >= self.width or y < 0 or y >= self.height:
+            return False
+        
+        # 更新位置
+        self.vehicles[vehicle_id].position = position
+        
+        # 更新空间索引
+        if self.spatial_index:
+            self.spatial_index.add_object(f"vehicle_{vehicle_id}", x, y)
+        
+        self._emit_event('vehicle_position_forced', {
+            'vehicle_id': vehicle_id,
+            'position': position
+        })
+        
+        return True
+    
+    def cleanup_expired_data(self):
+        """清理过期数据"""
+        current_time = time.time()
+        
+        # 清理性能监控中的过期数据
+        if hasattr(self, 'stats') and 'performance_metrics' in self.stats:
+            # 这里可以添加清理逻辑
+            pass
+        
+        # 清理空间索引中的无效对象
+        if self.spatial_index:
+            # 移除不存在的车辆
+            valid_vehicle_ids = set(self.vehicles.keys())
+            for obj_id in list(self.spatial_index.object_positions.keys()):
+                if obj_id.startswith('vehicle_'):
+                    vehicle_id = obj_id.replace('vehicle_', '')
+                    if vehicle_id not in valid_vehicle_ids:
+                        self.spatial_index.remove_object(obj_id)
+    
+    def get_vehicle_near_point(self, point: Tuple[float, float], radius: float = 10.0):
+        """获取点位附近的车辆"""
+        nearby_vehicles = []
+        
+        for vehicle_id, vehicle in self.vehicles.items():
+            pos = vehicle.position
+            distance = math.sqrt((pos[0] - point[0])**2 + (pos[1] - point[1])**2)
+            
+            if distance <= radius:
+                nearby_vehicles.append({
+                    'vehicle_id': vehicle_id,
+                    'distance': distance,
+                    'position': pos,
+                    'status': vehicle.status
+                })
+        
+        # 按距离排序
+        nearby_vehicles.sort(key=lambda x: x['distance'])
+        return nearby_vehicles
+    
+    def export_vehicle_data(self):
+        """导出车辆数据"""
+        vehicle_data = []
+        
+        for vehicle_id, vehicle in self.vehicles.items():
+            data = {
+                'vehicle_id': vehicle_id,
+                'position': vehicle.position,
+                'initial_position': vehicle.initial_position,
+                'status': vehicle.status,
+                'vehicle_type': vehicle.vehicle_type,
+                'max_load': vehicle.max_load,
+                'current_load': vehicle.current_load,
+                'completed_cycles': vehicle.completed_cycles,
+                'total_distance': vehicle.total_distance,
+                'total_time': vehicle.total_time
+            }
+            vehicle_data.append(data)
+        
+        return vehicle_data
 # ==================== 向后兼容性 ====================
 
 # 为了保持向后兼容性，提供原始类名的别名

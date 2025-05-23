@@ -1520,7 +1520,131 @@ class OptimizedVehicleScheduler:
             
         except Exception as e:
             print(f"恢复车辆调度器状态失败: {e}")
-
+    def clear_all_data(self):
+        """清除所有数据（重置时使用）"""
+        self.tasks.clear()
+        self.vehicle_states.clear()
+        self.mission_templates.clear()
+        self.active_assignments.clear()
+        self.pending_tasks.clear()
+        
+        # 重置统计信息
+        self.stats = {
+            'total_tasks': 0,
+            'completed_tasks': 0,
+            'failed_tasks': 0,
+            'average_completion_time': 0,
+            'total_distance': 0,
+            'backbone_utilization_rate': 0,
+            'interface_efficiency': 0,
+            'vehicle_utilization': {},
+            'performance_trends': defaultdict(list),
+            'optimization_calls': 0,
+            'batch_planning_savings': 0
+        }
+        
+        print("已清除所有车辆调度数据")
+    
+    def force_vehicle_idle(self, vehicle_id):
+        """强制设置车辆为空闲状态"""
+        if vehicle_id in self.vehicle_states:
+            vehicle_state = self.vehicle_states[vehicle_id]
+            vehicle_state.status = VehicleStatus.IDLE
+            vehicle_state.current_task = None
+            
+            # 清空任务队列
+            if vehicle_id in self.active_assignments:
+                self.active_assignments[vehicle_id] = []
+            
+            # 同步到环境
+            if vehicle_id in self.env.vehicles:
+                self.env.vehicles[vehicle_id]['status'] = 'idle'
+            
+            # 释放交通管理器中的路径
+            if self.traffic_manager:
+                self.traffic_manager.release_vehicle_path(vehicle_id)
+    
+    def get_vehicle_task_progress(self, vehicle_id):
+        """获取车辆任务进度"""
+        if vehicle_id not in self.vehicle_states:
+            return None
+        
+        vehicle_state = self.vehicle_states[vehicle_id]
+        
+        if not vehicle_state.current_task or vehicle_state.current_task not in self.tasks:
+            return None
+        
+        task = self.tasks[vehicle_state.current_task]
+        
+        return {
+            'task_id': task.task_id,
+            'task_type': task.task_type,
+            'progress': task.execution_progress,
+            'status': task.status.value,
+            'quality_score': task.quality_score
+        }
+    
+    def cancel_vehicle_tasks(self, vehicle_id):
+        """取消车辆的所有任务"""
+        if vehicle_id not in self.vehicle_states:
+            return False
+        
+        vehicle_state = self.vehicle_states[vehicle_id]
+        
+        # 取消当前任务
+        if vehicle_state.current_task and vehicle_state.current_task in self.tasks:
+            task = self.tasks[vehicle_state.current_task]
+            task.status = TaskStatus.CANCELLED
+            
+            # 释放接口预约
+            for interface_id in task.reserved_interfaces:
+                if self.traffic_manager:
+                    self.traffic_manager.interface_manager.release_interface(interface_id, vehicle_id)
+        
+        # 取消队列中的任务
+        if vehicle_id in self.active_assignments:
+            for task_id in self.active_assignments[vehicle_id]:
+                if task_id in self.tasks:
+                    self.tasks[task_id].status = TaskStatus.CANCELLED
+            
+            self.active_assignments[vehicle_id] = []
+        
+        # 重置车辆状态
+        self.force_vehicle_idle(vehicle_id)
+        
+        return True
+    
+    def get_system_health_status(self):
+        """获取系统健康状态"""
+        total_vehicles = len(self.vehicle_states)
+        active_vehicles = len([v for v in self.vehicle_states.values() 
+                              if v.status != VehicleStatus.IDLE])
+        
+        total_tasks = len(self.tasks)
+        active_tasks = len([t for t in self.tasks.values() 
+                           if t.status == TaskStatus.IN_PROGRESS])
+        completed_tasks = len([t for t in self.tasks.values() 
+                              if t.status == TaskStatus.COMPLETED])
+        
+        return {
+            'vehicles': {
+                'total': total_vehicles,
+                'active': active_vehicles,
+                'idle': total_vehicles - active_vehicles,
+                'utilization_rate': active_vehicles / max(1, total_vehicles)
+            },
+            'tasks': {
+                'total': total_tasks,
+                'active': active_tasks,
+                'completed': completed_tasks,
+                'completion_rate': completed_tasks / max(1, total_tasks)
+            },
+            'system_load': active_vehicles / max(1, total_vehicles),
+            'avg_task_quality': sum(
+                task.quality_score for task in self.tasks.values() 
+                if task.status == TaskStatus.COMPLETED
+            ) / max(1, completed_tasks)
+        }
 # ECBS增强版调度器
 class ECBSEnhancedVehicleScheduler(OptimizedVehicleScheduler):
     """ECBS增强版车辆调度器"""
@@ -1643,8 +1767,32 @@ class ECBSEnhancedVehicleScheduler(OptimizedVehicleScheduler):
             stats['traffic_management'] = traffic_stats
         
         return stats
+class SimplifiedVehicleScheduler(OptimizedVehicleScheduler):
+    """简化版车辆调度器 - 为了向后兼容"""
+    
+    def __init__(self, env, path_planner=None, backbone_network=None, traffic_manager=None):
+        # 注意参数顺序的调整，以匹配原始调用
+        super().__init__(env, path_planner, traffic_manager, backbone_network)
+        
+        # 简化配置
+        self.batch_planning = False  # 禁用批量规划
+        self.parallel_processing = False  # 禁用并行处理
+        self.scheduling_strategy = 'greedy'  # 使用贪心策略
+        
+        print("初始化简化版车辆调度器")
+class SimplifiedECBSVehicleScheduler(ECBSEnhancedVehicleScheduler):
+    """简化版ECBS车辆调度器 - 为了向后兼容"""
+    
+    def __init__(self, env, path_planner=None, traffic_manager=None, backbone_network=None):
+        # 注意参数顺序的调整
+        super().__init__(env, path_planner, traffic_manager, backbone_network)
+        
+        # 简化ECBS配置
+        self.conflict_detection_interval = 15.0  # 增加检测间隔
+        
+        print("初始化简化版ECBS车辆调度器")
 
 # 向后兼容性
 VehicleScheduler = OptimizedVehicleScheduler
-SimplifiedVehicleScheduler = OptimizedVehicleScheduler
+SimplifiedVehicleScheduler = OptimizedVehicleScheduler  # 这里是正确的
 SimplifiedECBSVehicleScheduler = ECBSEnhancedVehicleScheduler

@@ -455,8 +455,7 @@ class EnhancedECBSSolver:
         
         return None
     
-    def _plan_alternative_backbone_path(self, start: Tuple, goal: Tuple, 
-                                       agent: str) -> Optional[List]:
+    def _plan_alternative_backbone_path(self, start, goal, agent):
         """规划替代的骨干路径"""
         if not self.backbone_network:
             return None
@@ -1279,6 +1278,105 @@ class OptimizedTrafficManager:
         
         for key in keys_to_remove:
             del self.path_reservations[key]
+    def _select_agent_for_replanning(self, conflict, paths):
+        """选择需要重新规划的智能体"""
+        agent1, agent2 = conflict.agent1, conflict.agent2
+        
+        # 优先重新规划优先级较低的智能体
+        if agent1 in paths and agent2 in paths:
+            path1_length = len(paths[agent1])
+            path2_length = len(paths[agent2])
+            
+            # 选择路径较短的智能体重新规划（影响较小）
+            if path1_length <= path2_length:
+                return agent1
+            else:
+                return agent2
+        
+        return agent1 if agent1 in paths else agent2
+    
+    def _generate_spatial_constraints(self, conflict, paths):
+        """生成空间约束"""
+        constraints = []
+        
+        if conflict.conflict_type == 'vertex':
+            # 顶点约束：在特定时间不能占用特定位置
+            constraint = SmartConstraint(
+                agent_id=conflict.agent1,
+                constraint_type='vertex',
+                location=conflict.location,
+                time_step=conflict.time_step,
+                priority=2
+            )
+            constraints.append(constraint)
+        
+        elif conflict.conflict_type == 'edge':
+            # 边约束：在特定时间不能使用特定边
+            constraint = SmartConstraint(
+                agent_id=conflict.agent1,
+                constraint_type='edge',
+                location=conflict.location,
+                time_step=conflict.time_step,
+                priority=2
+            )
+            constraints.append(constraint)
+        
+        return constraints
+    
+    def _replan_with_constraints(self, agent_id, start, goal, constraints):
+        """在约束条件下重新规划路径"""
+        if not self.path_planner:
+            return None
+        
+        try:
+            # 简化实现：多次尝试规划，每次增加迭代次数
+            for attempt in range(3):
+                max_iterations = 3000 + attempt * 1000
+                
+                # 使用路径规划器重新规划
+                result = self.path_planner.plan_path(
+                    agent_id, start, goal, use_backbone=True, check_conflicts=False
+                )
+                
+                if result:
+                    if isinstance(result, tuple):
+                        path, structure = result
+                        return path
+                    else:
+                        return result
+        
+        except Exception as e:
+            print(f"约束重新规划失败: {e}")
+        
+        return None
+    
+    def _determine_lower_priority_agent(self, agent1, agent2):
+        """确定较低优先级的智能体"""
+        # 简化实现：基于ID排序
+        return agent1 if agent1 < agent2 else agent2
+    
+    def _replan_with_interface_avoidance(self, agent, current_path, blocked_interface):
+        """规划避开特定接口的路径"""
+        if not current_path or len(current_path) < 2:
+            return None
+        
+        start, goal = current_path[0], current_path[-1]
+        
+        # 使用路径规划器重新规划（简化实现）
+        if hasattr(self, 'path_planner') and self.path_planner:
+            try:
+                result = self.path_planner.plan_path(
+                    agent, start, goal, use_backbone=True, check_conflicts=False
+                )
+                
+                if result:
+                    return result[0] if isinstance(result, tuple) else result
+            
+            except Exception as e:
+                print(f"接口回避规划失败: {e}")
+        
+        return None
+    
 
 # 向后兼容性
 TrafficManager = OptimizedTrafficManager

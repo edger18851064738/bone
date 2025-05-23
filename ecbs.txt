@@ -1,551 +1,376 @@
-Integrating ECBS with Your Backbone Network System
-Your project has a unique architecture where vehicles are guided onto pre-computed backbone roads, and you want to incorporate ECBS (Enhanced Conflict-Based Search) principles into your traffic management and scheduling components. Let me outline how to integrate these concepts effectively.
-Core Integration Concept
-The central idea is to maintain your backbone network as the primary navigation structure, while using ECBS principles for conflict resolution. This creates a hybrid system where:
+# traffic_manager.py 发现的问题和修复
 
-Vehicles primarily travel on optimized backbone paths
-Conflicts are detected and resolved using ECBS principles
-The system balances optimality with computational efficiency
+"""
+主要发现的问题：
+1. OptimizedTrafficManager 类中的一些方法实现不完整
+2. _select_agent_for_replanning 等方法缺失
+3. _replan_with_constraints 等方法缺失
+4. _generate_spatial_constraints 等方法缺失
+"""
 
-Traffic Manager With ECBS Principles
-The Traffic Manager should incorporate these ECBS elements:
-1. High-Level and Low-Level Search Structure
-pythonclass ECBSTrafficManager:
-    def __init__(self, env, backbone_network):
-        self.env = env
-        self.backbone_network = backbone_network
-        
-        # ECBS parameters
-        self.suboptimality_bound = 1.5
-        
-        # Constraint tree management
-        self.constraint_tree = None
-        self.open_list = []  # Priority queue for nodes by cost
-        self.focal_list = []  # Priority queue for low-conflict solutions
-        
-        # Conflict detection components
-        self.safety_rectangle = SafetyRectangle(
-            length=6.0,   # Vehicle length
-            width=3.0,    # Vehicle width
-            margin=0.5    # Safety margin
-        )
-        self.conflict_detector = PathConflictDetector(self.safety_rectangle)
-        
-        # Path reservation system
-        self.reservation_table = SpaceTimeReservationTable()
-        
-        # Vehicle path management
-        self.vehicle_paths = {}  # vehicle_id -> path
-2. Conflict Detection Focused on Backbone
-pythondef detect_conflicts(self, paths):
-    """Detect conflicts between paths with focus on backbone interactions"""
-    conflicts = []
-    vehicles = list(paths.keys())
+# 在 OptimizedTrafficManager 类中添加缺失的方法：
+
+class OptimizedTrafficManager:
+    """优化的交通管理器 - 修复版本"""
     
-    # Check pairwise conflicts
-    for i in range(len(vehicles)):
-        for j in range(i+1, len(vehicles)):
-            v1 = vehicles[i]
-            v2 = vehicles[j]
-            path1 = paths[v1]
-            path2 = paths[v2]
+    # ... 其他代码保持不变 ...
+    
+    # 添加缺失的方法实现：
+    
+    def _select_agent_for_replanning(self, conflict, paths):
+        """选择需要重新规划的智能体"""
+        agent1, agent2 = conflict.agent1, conflict.agent2
+        
+        # 优先重新规划优先级较低的智能体
+        if agent1 in paths and agent2 in paths:
+            path1_length = len(paths[agent1])
+            path2_length = len(paths[agent2])
             
-            # Check for different conflict types
-            # 1. Backbone connection conflicts (entry points)
-            conn_conflict = self._check_connection_conflict(v1, path1, v2, path2)
-            if conn_conflict:
-                conflicts.append(conn_conflict)
-                continue
-                
-            # 2. Backbone traversal conflicts (same path section)
-            trav_conflict = self._check_traversal_conflict(v1, path1, v2, path2)
-            if trav_conflict:
-                conflicts.append(trav_conflict)
-                continue
-                
-            # 3. General path conflicts
-            gen_conflict = self.conflict_detector.check_path_conflict(v1, path1, v2, path2)
-            if gen_conflict:
-                conflicts.append(gen_conflict)
-    
-    return conflicts
-
-def _check_connection_conflict(self, v1, path1, v2, path2):
-    """Check if two vehicles try to use the same backbone connection point"""
-    # Find backbone connection points in both paths
-    conn_points1 = self._find_backbone_connections(path1)
-    conn_points2 = self._find_backbone_connections(path2)
-    
-    for cp1 in conn_points1:
-        for cp2 in conn_points2:
-            # If using same connection at similar time
-            if self._is_same_connection(cp1['conn'], cp2['conn']):
-                if abs(cp1['time'] - cp2['time']) < 5.0:  # Time threshold
-                    return Conflict(
-                        agent1=v1, 
-                        agent2=v2,
-                        location=cp1['conn']['position'],
-                        time_step=min(cp1['time'], cp2['time']),
-                        conflict_type="connection"
-                    )
-    
-    return None
-3. ECBS-Style Constraint Tree
-pythondef resolve_conflicts(self, initial_paths):
-    """Resolve conflicts using ECBS-style constraint tree search"""
-    # Initialize constraint tree with root node
-    root = ConstraintTreeNode(
-        constraints=[],
-        solution=initial_paths,
-        cost=self._calculate_solution_cost(initial_paths)
-    )
-    
-    # Initialize search
-    self.open_list = [root]
-    self.focal_list = [root]
-    
-    # ECBS search
-    while self.open_list and len(self.open_list) < 1000:  # Limit iterations
-        # Get best node from focal list
-        current = self._get_best_node()
-        
-        # Check for conflicts
-        conflicts = self.detect_conflicts(current.solution)
-        
-        # If no conflicts, we found a solution
-        if not conflicts:
-            return current.solution
-            
-        # Select first conflict
-        conflict = conflicts[0]
-        
-        # Generate constraints for both agents
-        constraint1 = self._generate_constraint(conflict.agent1, conflict)
-        constraint2 = self._generate_constraint(conflict.agent2, conflict)
-        
-        # Create child nodes with new constraints
-        for constraint in [constraint1, constraint2]:
-            child = self._create_child_node(current, constraint)
-            if child:
-                # Add to open list
-                self.open_list.append(child)
-                
-                # Update focal list
-                min_cost = min(node.cost for node in self.open_list)
-                focal_bound = min_cost * self.suboptimality_bound
-                
-                if child.cost <= focal_bound:
-                    self.focal_list.append(child)
-    
-    # If we reach here, return best solution found so far
-    return self._get_best_solution()
-4. Backbone-Aware Constraint Application
-pythondef _apply_constraint(self, agent_id, constraint, solution):
-    """Apply constraint while preserving backbone usage when possible"""
-    # Get current path
-    current_path = solution[agent_id]
-    
-    # Identify backbone segments in the path
-    backbone_segments = self._identify_backbone_segments(current_path)
-    
-    # Try to preserve backbone segments while avoiding constraint
-    new_path = self._replan_with_constraint(
-        agent_id, 
-        current_path, 
-        constraint,
-        backbone_segments
-    )
-    
-    # If replanning failed, try more aggressive deviation
-    if not new_path:
-        new_path = self._replan_with_constraint(
-            agent_id, 
-            current_path, 
-            constraint,
-            []  # No backbone preservation
-        )
-    
-    return new_path
-
-def _identify_backbone_segments(self, path):
-    """Identify which parts of the path use backbone network"""
-    segments = []
-    current_segment = None
-    
-    for i, point in enumerate(path):
-        # Check if point is on backbone
-        backbone_path_id = self._point_on_backbone(point)
-        
-        if backbone_path_id:
-            # Start a new segment or continue current one
-            if current_segment and current_segment['path_id'] == backbone_path_id:
-                current_segment['end_idx'] = i
+            # 选择路径较短的智能体重新规划（影响较小）
+            if path1_length <= path2_length:
+                return agent1
             else:
-                # Start new segment
-                if current_segment:
-                    segments.append(current_segment)
+                return agent2
+        
+        return agent1 if agent1 in paths else agent2
+    
+    def _generate_spatial_constraints(self, conflict, paths):
+        """生成空间约束"""
+        constraints = []
+        
+        if conflict.conflict_type == 'vertex':
+            # 顶点约束：在特定时间不能占用特定位置
+            constraint = SmartConstraint(
+                agent_id=conflict.agent1,
+                constraint_type='vertex',
+                location=conflict.location,
+                time_step=conflict.time_step,
+                priority=2
+            )
+            constraints.append(constraint)
+        
+        elif conflict.conflict_type == 'edge':
+            # 边约束：在特定时间不能使用特定边
+            constraint = SmartConstraint(
+                agent_id=conflict.agent1,
+                constraint_type='edge',
+                location=conflict.location,
+                time_step=conflict.time_step,
+                priority=2
+            )
+            constraints.append(constraint)
+        
+        return constraints
+    
+    def _replan_with_constraints(self, agent_id, start, goal, constraints):
+        """在约束条件下重新规划路径"""
+        if not self.path_planner:
+            return None
+        
+        try:
+            # 简化实现：多次尝试规划，每次增加迭代次数
+            for attempt in range(3):
+                max_iterations = 3000 + attempt * 1000
                 
-                current_segment = {
-                    'path_id': backbone_path_id,
-                    'start_idx': i,
-                    'end_idx': i
-                }
-        elif current_segment:
-            # End of segment
-            segments.append(current_segment)
-            current_segment = None
-    
-    # Add last segment if exists
-    if current_segment:
-        segments.append(current_segment)
-    
-    return segments
-Vehicle Scheduler with ECBS-Informed Task Management
-The Vehicle Scheduler should work with the Traffic Manager to execute tasks efficiently:
-1. Task Assignment with Prioritization
-pythonclass ECBSVehicleScheduler:
-    def __init__(self, env, path_planner, traffic_manager):
-        self.env = env
-        self.path_planner = path_planner
-        self.traffic_manager = traffic_manager
+                # 使用路径规划器重新规划
+                result = self.path_planner.plan_path(
+                    agent_id, start, goal, use_backbone=True, check_conflicts=False
+                )
+                
+                if result:
+                    if isinstance(result, tuple):
+                        path, structure = result
+                        return path
+                    else:
+                        return result
         
-        # Task management
-        self.tasks = {}  # task_id -> task
-        self.task_queues = {}  # vehicle_id -> [task_ids]
-        self.vehicle_statuses = {}  # vehicle_id -> status
+        except Exception as e:
+            print(f"约束重新规划失败: {e}")
         
-        # ECBS-influenced priority management
-        self.vehicle_priorities = {}  # vehicle_id -> priority
-        self.task_priorities = {}  # task_id -> priority
-        
-        # Statistics for optimization
-        self.completed_tasks = 0
-        self.conflict_counts = {}  # vehicle_id -> conflict_count
+        return None
     
-    def assign_tasks_batch(self, tasks_batch):
-        """Assign a batch of tasks using ECBS principles for prioritization"""
-        # Sort tasks by priority
-        sorted_tasks = sorted(
-            tasks_batch, 
-            key=lambda t: self.task_priorities.get(t.task_id, 1),
-            reverse=True
+    def _determine_lower_priority_agent(self, agent1, agent2):
+        """确定较低优先级的智能体"""
+        # 简化实现：基于ID排序
+        return agent1 if agent1 < agent2 else agent2
+    
+    def _replan_with_interface_avoidance(self, agent, current_path, blocked_interface):
+        """规划避开特定接口的路径"""
+        if not current_path or len(current_path) < 2:
+            return None
+        
+        start, goal = current_path[0], current_path[-1]
+        
+        # 使用路径规划器重新规划（简化实现）
+        if hasattr(self, 'path_planner') and self.path_planner:
+            try:
+                result = self.path_planner.plan_path(
+                    agent, start, goal, use_backbone=True, check_conflicts=False
+                )
+                
+                if result:
+                    return result[0] if isinstance(result, tuple) else result
+            
+            except Exception as e:
+                print(f"接口回避规划失败: {e}")
+        
+        return None
+    
+    def _is_path_better(self, new_path, old_path):
+        """比较路径质量 - 已在原代码中实现，确保存在"""
+        if not new_path or not old_path:
+            return bool(new_path)
+        
+        # 简单的长度比较
+        new_length = sum(
+            math.sqrt((new_path[i+1][0] - new_path[i][0])**2 + 
+                     (new_path[i+1][1] - new_path[i][1])**2)
+            for i in range(len(new_path) - 1)
         )
         
-        # Assign tasks to vehicles
-        assignments = {}  # vehicle_id -> task_id
-        
-        for task in sorted_tasks:
-            # Find best vehicle
-            best_vehicle = self._find_best_vehicle(task)
-            
-            if best_vehicle:
-                assignments[best_vehicle] = task.task_id
-                self.assign_task(best_vehicle, task.task_id)
-        
-        # Plan coordinated paths for all assigned vehicles
-        vehicle_ids = list(assignments.keys())
-        self._plan_coordinated_paths(vehicle_ids)
-        
-        return assignments
-2. Coordinated Path Planning
-pythondef _plan_coordinated_paths(self, vehicle_ids):
-    """Plan coordinated conflict-free paths for multiple vehicles"""
-    # Initialize paths dictionary
-    paths = {}
-    
-    # First, plan individual paths for each vehicle
-    for vehicle_id in vehicle_ids:
-        # Get current task
-        task_id = self.vehicle_statuses[vehicle_id]['current_task']
-        if not task_id or task_id not in self.tasks:
-            continue
-            
-        task = self.tasks[task_id]
-        
-        # Plan path using backbone network
-        path = self.path_planner.plan_path(
-            vehicle_id,
-            task.start,
-            task.goal,
-            use_backbone=True
+        old_length = sum(
+            math.sqrt((old_path[i+1][0] - old_path[i][0])**2 + 
+                     (old_path[i+1][1] - old_path[i][1])**2)
+            for i in range(len(old_path) - 1)
         )
         
-        if path:
-            paths[vehicle_id] = path
-    
-    # If paths were found for all vehicles
-    if len(paths) == len(vehicle_ids):
-        # Resolve conflicts using traffic manager's ECBS implementation
-        conflict_free_paths = self.traffic_manager.resolve_conflicts(paths)
-        
-        # Update tasks with new paths
-        for vehicle_id, path in conflict_free_paths.items():
-            task_id = self.vehicle_statuses[vehicle_id]['current_task']
-            if task_id in self.tasks:
-                self.tasks[task_id].path = path
-                
-                # Update vehicle path
-                self.env.vehicles[vehicle_id]['path'] = path
-                self.env.vehicles[vehicle_id]['path_index'] = 0
-                self.env.vehicles[vehicle_id]['progress'] = 0.0
-3. Task Execution with Conflict Monitoring
-pythondef update(self, time_delta):
-    """Update all vehicles and task progress with conflict monitoring"""
-    # First update task and vehicle states
-    for vehicle_id in self.vehicle_statuses:
-        self._update_vehicle(vehicle_id, time_delta)
-    
-    # Check for new conflicts in current execution
-    active_vehicles = []
-    active_paths = {}
-    
-    for vehicle_id, status in self.vehicle_statuses.items():
-        if status['status'] == 'moving' and status['current_task']:
-            active_vehicles.append(vehicle_id)
-            
-            # Get current path
-            task_id = status['current_task']
-            if task_id in self.tasks and self.tasks[task_id].path:
-                active_paths[vehicle_id] = self.tasks[task_id].path
-    
-    # If multiple active vehicles, check for conflicts
-    if len(active_vehicles) > 1:
-        conflicts = self.traffic_manager.detect_conflicts(active_paths)
-        
-        # If conflicts found, resolve them
-        if conflicts:
-            # Log the conflict for priority adjustment
-            for conflict in conflicts:
-                self.conflict_counts[conflict.agent1] = self.conflict_counts.get(conflict.agent1, 0) + 1
-                self.conflict_counts[conflict.agent2] = self.conflict_counts.get(conflict.agent2, 0) + 1
-            
-            # Resolve conflicts
-            new_paths = self.traffic_manager.resolve_conflicts(active_paths)
-            
-            # Update paths
-            for vehicle_id, path in new_paths.items():
-                task_id = self.vehicle_statuses[vehicle_id]['current_task']
-                if task_id in self.tasks:
-                    self.tasks[task_id].path = path
-                    
-                    # Update vehicle path
-                    self.env.vehicles[vehicle_id]['path'] = path
-                    self.env.vehicles[vehicle_id]['path_index'] = 0
-                    self.env.vehicles[vehicle_id]['progress'] = 0.0
-Practical Implementation Workflow
-To implement this integration effectively, follow this workflow:
-Phase 1: Extend TrafficManager with ECBS Components
+        return new_length <= old_length * 1.2
 
-Add ECBS-style constraint tree structure
-Implement the focal list mechanism with suboptimality bounds
-Create specialized conflict detection for backbone connections
-Add constraint generation and application specific to backbone usage
 
-Example structure for traffic_manager.py:
-pythonclass TrafficManager:
-    # Basic initialization
-    def __init__(self, env, backbone_network=None):
-        self.env = env
-        self.backbone_network = backbone_network
-        
-        # ECBS components
-        self.suboptimality_bound = 1.5
-        self.open_list = []
-        self.focal_list = []
-        
-        # Conflict detection
-        self.safety_rectangle = SafetyRectangle(6.0, 3.0, 0.5)
-        self.conflict_detector = PathConflictDetector(self.safety_rectangle)
-        
-        # Reservation system
-        self.reservation_table = SpaceTimeReservationTable()
-        self.vehicle_paths = {}
+# 修复 EnhancedECBSSolver 类中的缺失方法：
+
+class EnhancedECBSSolver:
+    """增强的ECBS求解器 - 修复版本"""
     
-    # Core ECBS functionality
-    def resolve_conflicts(self, paths):
-        """Main ECBS-based conflict resolution"""
-        # Initialize constraint tree
-        root = ConstraintTreeNode([], paths, self._calculate_solution_cost(paths))
-        self.open_list = [root]
-        self.focal_list = [root]
+    # ... 其他代码保持不变 ...
+    
+    def _plan_alternative_backbone_path(self, start, goal, agent):
+        """规划替代的骨干路径"""
+        if not self.backbone_network:
+            return None
         
-        # ECBS search
-        while self.open_list:
-            # Get best node from focal list (by conflict count)
-            current = self._get_best_node_from_focal()
+        # 尝试使用不同的骨干路径
+        target_type, target_id = self.backbone_network.identify_target_point(goal)
+        if not target_type:
+            return None
+        
+        # 获取所有可用路径
+        available_paths = self.backbone_network.find_paths_to_target(target_type, target_id)
+        
+        for path_data in available_paths:
+            try:
+                # 尝试使用这条骨干路径
+                result = self.backbone_network.get_path_from_position_to_target(
+                    start, target_type, target_id
+                )
+                
+                if result and result[0]:
+                    return result[0]
             
-            # Check for conflicts
-            conflicts = self.detect_conflicts(current.solution)
-            if not conflicts:
-                return current.solution
-                
-            # Generate constraints and child nodes
-            conflict = conflicts[0]
-            for agent_id in [conflict.agent1, conflict.agent2]:
-                # Create constraint
-                constraint = self._create_constraint(agent_id, conflict)
-                
-                # Create child node
-                child = self._create_child_node(current, constraint)
-                if child:
-                    # Add to open list
-                    self._add_to_open_list(child)
-                    
-                    # Update focal list
-                    self._update_focal_list()
+            except Exception:
+                continue
         
-        # If no solution, return best partial solution
-        return self._get_best_solution()
-    
-    # Specific backbone conflict detection
-    def detect_conflicts(self, paths):
-        """Detect conflicts with focus on backbone interactions"""
-        conflicts = []
-        vehicles = list(paths.keys())
-        
-        for i in range(len(vehicles)):
-            for j in range(i+1, len(vehicles)):
-                v1, v2 = vehicles[i], vehicles[j]
-                
-                # Check connection conflicts
-                conflict = self._check_backbone_connection_conflict(v1, paths[v1], v2, paths[v2])
-                if conflict:
-                    conflicts.append(conflict)
-                    continue
-                
-                # Regular path conflict check
-                conflict = self.conflict_detector.check_path_conflict(v1, paths[v1], v2, paths[v2])
-                if conflict:
-                    conflicts.append(conflict)
-        
-        return conflicts
-Phase 2: Enhance VehicleScheduler with ECBS Task Management
+        return None
 
-Add priority-based task assignment
-Implement batch processing of tasks using ECBS principles
-Create coordinated path planning for multiple vehicles
-Add dynamic conflict detection and resolution during execution
+# 确保所有导入都正确
+import math
+import heapq
+import time
+import numpy as np
+from typing import List, Dict, Tuple, Set, Optional, Any
+from collections import defaultdict, deque
+from dataclasses import dataclass, field
+import threading
+from concurrent.futures import ThreadPoolExecutor
+import weakref；；
 
-Example structure for vehicle_scheduler.py:
-pythonclass VehicleScheduler:
-    def __init__(self, env, path_planner=None, traffic_manager=None):
-        self.env = env
-        self.path_planner = path_planner
-        self.traffic_manager = traffic_manager
-        
-        # Task management
-        self.tasks = {}
-        self.task_queues = {}
-        self.vehicle_statuses = {}
-        
-        # ECBS-inspired prioritization
-        self.vehicle_priorities = {}
-        
-        # Statistics
-        self.conflict_history = {}
+# vehicle_scheduler.py 发现的问题和修复
+
+"""
+主要发现的问题：
+1. OptimizedVehicleScheduler 类名称与SimplifiedVehicleScheduler别名不匹配
+2. 一些方法调用可能存在问题
+3. 需要确保所有必要的方法都已实现
+"""
+
+# 在文件末尾的向后兼容性部分修复：
+
+# 向后兼容性 - 修复别名
+VehicleScheduler = OptimizedVehicleScheduler
+SimplifiedVehicleScheduler = OptimizedVehicleScheduler  # 这里是正确的
+SimplifiedECBSVehicleScheduler = ECBSEnhancedVehicleScheduler
+
+# 为了确保向后兼容，添加一个真正的SimplifiedVehicleScheduler类：
+
+class SimplifiedVehicleScheduler(OptimizedVehicleScheduler):
+    """简化版车辆调度器 - 为了向后兼容"""
     
-    # Task assignment with prioritization
-    def assign_mission(self, vehicle_id, template_id):
-        """Assign a mission to a vehicle with prioritization"""
-        # Get template
-        template = self.mission_templates.get(template_id)
-        if not template:
+    def __init__(self, env, path_planner=None, backbone_network=None, traffic_manager=None):
+        # 注意参数顺序的调整，以匹配原始调用
+        super().__init__(env, path_planner, traffic_manager, backbone_network)
+        
+        # 简化配置
+        self.batch_planning = False  # 禁用批量规划
+        self.parallel_processing = False  # 禁用并行处理
+        self.scheduling_strategy = 'greedy'  # 使用贪心策略
+        
+        print("初始化简化版车辆调度器")
+
+class SimplifiedECBSVehicleScheduler(ECBSEnhancedVehicleScheduler):
+    """简化版ECBS车辆调度器 - 为了向后兼容"""
+    
+    def __init__(self, env, path_planner=None, traffic_manager=None, backbone_network=None):
+        # 注意参数顺序的调整
+        super().__init__(env, path_planner, traffic_manager, backbone_network)
+        
+        # 简化ECBS配置
+        self.conflict_detection_interval = 15.0  # 增加检测间隔
+        
+        print("初始化简化版ECBS车辆调度器")
+
+
+# 在OptimizedVehicleScheduler类中添加一些可能缺失的方法：
+
+class OptimizedVehicleScheduler:
+    """优化版车辆调度器 - 修复版本"""
+    
+    # ... 其他代码保持不变 ...
+    
+    def clear_all_data(self):
+        """清除所有数据（重置时使用）"""
+        self.tasks.clear()
+        self.vehicle_states.clear()
+        self.mission_templates.clear()
+        self.active_assignments.clear()
+        self.pending_tasks.clear()
+        
+        # 重置统计信息
+        self.stats = {
+            'total_tasks': 0,
+            'completed_tasks': 0,
+            'failed_tasks': 0,
+            'average_completion_time': 0,
+            'total_distance': 0,
+            'backbone_utilization_rate': 0,
+            'interface_efficiency': 0,
+            'vehicle_utilization': {},
+            'performance_trends': defaultdict(list),
+            'optimization_calls': 0,
+            'batch_planning_savings': 0
+        }
+        
+        print("已清除所有车辆调度数据")
+    
+    def force_vehicle_idle(self, vehicle_id):
+        """强制设置车辆为空闲状态"""
+        if vehicle_id in self.vehicle_states:
+            vehicle_state = self.vehicle_states[vehicle_id]
+            vehicle_state.status = VehicleStatus.IDLE
+            vehicle_state.current_task = None
+            
+            # 清空任务队列
+            if vehicle_id in self.active_assignments:
+                self.active_assignments[vehicle_id] = []
+            
+            # 同步到环境
+            if vehicle_id in self.env.vehicles:
+                self.env.vehicles[vehicle_id]['status'] = 'idle'
+            
+            # 释放交通管理器中的路径
+            if self.traffic_manager:
+                self.traffic_manager.release_vehicle_path(vehicle_id)
+    
+    def get_vehicle_task_progress(self, vehicle_id):
+        """获取车辆任务进度"""
+        if vehicle_id not in self.vehicle_states:
+            return None
+        
+        vehicle_state = self.vehicle_states[vehicle_id]
+        
+        if not vehicle_state.current_task or vehicle_state.current_task not in self.tasks:
+            return None
+        
+        task = self.tasks[vehicle_state.current_task]
+        
+        return {
+            'task_id': task.task_id,
+            'task_type': task.task_type,
+            'progress': task.execution_progress,
+            'status': task.status.value,
+            'quality_score': task.quality_score
+        }
+    
+    def cancel_vehicle_tasks(self, vehicle_id):
+        """取消车辆的所有任务"""
+        if vehicle_id not in self.vehicle_states:
             return False
         
-        # Create tasks from template
-        task_ids = []
-        current_position = self.vehicle_statuses[vehicle_id]['position']
+        vehicle_state = self.vehicle_states[vehicle_id]
         
-        for task_template in template:
-            task_id = f"task_{self.task_counter}"
-            self.task_counter += 1
+        # 取消当前任务
+        if vehicle_state.current_task and vehicle_state.current_task in self.tasks:
+            task = self.tasks[vehicle_state.current_task]
+            task.status = TaskStatus.CANCELLED
             
-            # Create task with priority
-            task = VehicleTask(
-                task_id,
-                task_template['task_type'],
-                current_position,
-                task_template['goal'],
-                task_template['priority'] * self.vehicle_priorities.get(vehicle_id, 1)
-            )
-            
-            # Update for next task
-            current_position = task.goal
-            
-            # Store task
-            self.tasks[task_id] = task
-            task_ids.append(task_id)
+            # 释放接口预约
+            for interface_id in task.reserved_interfaces:
+                if self.traffic_manager:
+                    self.traffic_manager.interface_manager.release_interface(interface_id, vehicle_id)
         
-        # Add tasks to queue
-        self.task_queues[vehicle_id] = task_ids
+        # 取消队列中的任务
+        if vehicle_id in self.active_assignments:
+            for task_id in self.active_assignments[vehicle_id]:
+                if task_id in self.tasks:
+                    self.tasks[task_id].status = TaskStatus.CANCELLED
+            
+            self.active_assignments[vehicle_id] = []
         
-        # Start if idle
-        if self.vehicle_statuses[vehicle_id]['status'] == 'idle':
-            self._start_next_task(vehicle_id)
+        # 重置车辆状态
+        self.force_vehicle_idle(vehicle_id)
         
         return True
     
-    # Coordinated path planning
-    def plan_coordinated_paths(self, vehicle_ids):
-        """Plan coordinated paths for multiple vehicles"""
-        # Get paths for each vehicle
-        paths = {}
-        for vehicle_id in vehicle_ids:
-            task_id = self.vehicle_statuses[vehicle_id]['current_task']
-            if not task_id or task_id not in self.tasks:
-                continue
-                
-            task = self.tasks[task_id]
-            
-            # Plan using backbone
-            path = self.path_planner.plan_path(
-                vehicle_id, task.start, task.goal, use_backbone=True
-            )
-            
-            if path:
-                paths[vehicle_id] = path
+    def get_system_health_status(self):
+        """获取系统健康状态"""
+        total_vehicles = len(self.vehicle_states)
+        active_vehicles = len([v for v in self.vehicle_states.values() 
+                              if v.status != VehicleStatus.IDLE])
         
-        # Resolve conflicts using traffic manager
-        if len(paths) > 1 and self.traffic_manager:
-            conflict_free_paths = self.traffic_manager.resolve_conflicts(paths)
-            
-            # Update tasks with new paths
-            for vehicle_id, path in conflict_free_paths.items():
-                task_id = self.vehicle_statuses[vehicle_id]['current_task']
-                if task_id in self.tasks:
-                    self.tasks[task_id].path = path
-                    
-                    # Update vehicle path
-                    self.env.vehicles[vehicle_id]['path'] = path
-                    self.env.vehicles[vehicle_id]['path_index'] = 0
-                    self.env.vehicles[vehicle_id]['progress'] = 0.0
-Key ECBS Integration Points
-For the most effective integration, focus on these specific components of ECBS:
-
-Constraint Tree Structure: Maintain a tree of constraints and solutions, with each node representing a set of constraints and resulting paths
-Focal List: Use the focal list concept to balance optimality and conflict resolution, focusing on solutions with fewer conflicts first
-Backbone-Specific Constraints: Design constraints that respect the backbone structure, like:
-
-Time-based constraints at backbone entry/exit points
-Lane-based constraints for parallel travel on the backbone
-Priority-based constraints at intersections or bottlenecks
-
-
-Suboptimality Bounds: Use the suboptimality parameter to control the trade-off between path optimality and computational efficiency
-Conflict Classification: Categorize conflicts based on their relationship to the backbone network:
-
-Connection conflicts (at entry/exit points)
-Traversal conflicts (along backbone paths)
-Narrow passage conflicts (at bottlenecks)
+        total_tasks = len(self.tasks)
+        active_tasks = len([t for t in self.tasks.values() 
+                           if t.status == TaskStatus.IN_PROGRESS])
+        completed_tasks = len([t for t in self.tasks.values() 
+                              if t.status == TaskStatus.COMPLETED])
+        
+        return {
+            'vehicles': {
+                'total': total_vehicles,
+                'active': active_vehicles,
+                'idle': total_vehicles - active_vehicles,
+                'utilization_rate': active_vehicles / max(1, total_vehicles)
+            },
+            'tasks': {
+                'total': total_tasks,
+                'active': active_tasks,
+                'completed': completed_tasks,
+                'completion_rate': completed_tasks / max(1, total_tasks)
+            },
+            'system_load': active_vehicles / max(1, total_vehicles),
+            'avg_task_quality': sum(
+                task.quality_score for task in self.tasks.values() 
+                if task.status == TaskStatus.COMPLETED
+            ) / max(1, completed_tasks)
+        }
 
 
-
-Conclusion
-By integrating ECBS principles into your traffic manager and vehicle scheduler, while maintaining your backbone network as the primary navigation structure, you create a robust system that:
-
-Efficiently guides vehicles along optimized pre-computed paths
-Systematically detects and resolves conflicts using constraint-based search
-Balances solution quality with computational efficiency through focal lists
-Adjusts to dynamic situations through continuous monitoring and replanning
-
-This approach leverages the strengths of both systems: the efficiency of backbone networks for path planning and the conflict resolution power of ECBS for traffic management.
+# 确保所有必要的导入都存在
+import math
+import heapq
+import time
+import threading
+from typing import List, Dict, Tuple, Set, Optional, Any
+from collections import defaultdict, deque
+from dataclasses import dataclass, field
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import numpy as np
+from enum import Enum

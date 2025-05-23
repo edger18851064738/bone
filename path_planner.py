@@ -41,12 +41,12 @@ class SimplifiedPathPlanner:
     """
     
     def __init__(self, env, backbone_network=None, rrt_planner=None, traffic_manager=None):
-        """初始化简化的路径规划器"""
+        # 初始化代码保持不变
         self.env = env
         self.backbone_network = backbone_network
         self.traffic_manager = traffic_manager
         
-        # RRT规划器初始化
+        # RRT规划器初始化 - 修复错误处理
         if rrt_planner is None:
             try:
                 self.rrt_planner = OptimizedRRTPlanner(
@@ -59,8 +59,8 @@ class SimplifiedPathPlanner:
                 print("已自动创建OptimizedRRTPlanner实例")
             except Exception as e:
                 print(f"警告: 无法创建OptimizedRRTPlanner: {e}")
-                # 回退到原始RRT规划器
                 try:
+                    # 修复：导入应该在函数内部进行
                     from RRT import RRTPlanner
                     self.rrt_planner = RRTPlanner(
                         env,
