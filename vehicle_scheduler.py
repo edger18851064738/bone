@@ -1,1237 +1,1568 @@
+"""
+vehicle_scheduler.py - 优化版车辆调度器
+深度集成接口系统、智能调度、预测性优化
+"""
+
 import math
 import heapq
 import time
+import threading
 from typing import List, Dict, Tuple, Set, Optional, Any
-from collections import defaultdict
+from collections import defaultdict, deque
+from dataclasses import dataclass, field
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import numpy as np
+from enum import Enum
 
-class VehicleTask:
-    """车辆任务类 - 接口系统优化版"""
+class TaskStatus(Enum):
+    PENDING = "pending"
+    ASSIGNED = "assigned"
+    IN_PROGRESS = "in_progress"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+
+class VehicleStatus(Enum):
+    IDLE = "idle"
+    MOVING = "moving"
+    LOADING = "loading"
+    UNLOADING = "unloading"
+    WAITING = "waiting"
+    MAINTENANCE = "maintenance"
+
+@dataclass
+class EnhancedVehicleTask:
+    """增强的车辆任务类"""
+    task_id: str
+    task_type: str
+    start: Tuple[float, float, float]
+    goal: Tuple[float, float, float]
+    priority: int = 1
+    status: TaskStatus = TaskStatus.PENDING
     
-    def __init__(self, task_id, task_type, start, goal, priority=1, 
-                 loading_point_id=None, unloading_point_id=None):
-        self.task_id = task_id
-        self.task_type = task_type
-        self.start = start
-        self.goal = goal
-        self.priority = priority
-        self.status = 'pending'
-        self.assigned_vehicle = None
-        self.progress = 0.0
-        self.path = None
-        self.estimated_time = 0
-        self.start_time = 0
-        self.completion_time = 0
-        
-        self.loading_point_id = loading_point_id
-        self.unloading_point_id = unloading_point_id
-        
-        # 接口系统相关字段
-        self.path_structure = {
-            'type': 'unknown',
-            'uses_backbone': False,
-            'interface_id': None,          # 使用的接口ID
-            'backbone_path_id': None,
-            'backbone_utilization': 0.0,
-            'access_length': 0,
-            'backbone_length': 0,
-            'total_length': 0
-        }
-        
-        # 接口预约信息
-        self.reserved_interface = None
-        self.interface_reservation_time = None
-        
-        self.quality_score = 0.0
+    # 任务属性
+    loading_point_id: Optional[int] = None
+    unloading_point_id: Optional[int] = None
+    deadline: Optional[float] = None
+    estimated_duration: float = 0
     
-    def reserve_interface(self, interface_id, backbone_network, duration=60):
+    # 分配信息
+    assigned_vehicle: Optional[str] = None
+    assignment_time: float = 0
+    start_time: float = 0
+    completion_time: float = 0
+    
+    # 路径信息
+    path: Optional[List] = None
+    path_structure: Dict = field(default_factory=dict)
+    quality_score: float = 0.0
+    
+    # 接口相关
+    reserved_interfaces: List[str] = field(default_factory=list)
+    interface_access_times: Dict[str, float] = field(default_factory=dict)
+    
+    # 性能指标
+    planning_time: float = 0
+    execution_progress: float = 0
+    actual_duration: float = 0
+    
+    def update_progress(self, progress: float):
+        """更新执行进度"""
+        self.execution_progress = max(0, min(1.0, progress))
+        if self.execution_progress >= 1.0:
+            self.status = TaskStatus.COMPLETED
+            self.completion_time = time.time()
+            self.actual_duration = self.completion_time - self.start_time
+    
+    def reserve_interface(self, interface_id: str, access_time: float):
         """预约接口"""
-        if interface_id in backbone_network.backbone_interfaces:
-            interface = backbone_network.backbone_interfaces[interface_id]
-            if interface.is_available():
-                interface.reserve(self.assigned_vehicle, duration)
-                self.reserved_interface = interface_id
-                self.interface_reservation_time = time.time()
-                return True
-        return False
+        if interface_id not in self.reserved_interfaces:
+            self.reserved_interfaces.append(interface_id)
+        self.interface_access_times[interface_id] = access_time
     
-    def release_interface(self, backbone_network):
-        """释放接口"""
-        if self.reserved_interface and self.reserved_interface in backbone_network.backbone_interfaces:
-            backbone_network.backbone_interfaces[self.reserved_interface].release()
-            self.reserved_interface = None
-            self.interface_reservation_time = None
-    
-    def update_path_structure(self, structure):
-        """更新路径结构信息 - 接口系统版"""
-        if not structure:
-            return
-        
-        # 更新基本结构信息
-        self.path_structure.update(structure)
-        
-        # 处理接口辅助路径
-        if structure.get('type') == 'interface_assisted':
-            self.path_structure['uses_backbone'] = True
-            self.path_structure['interface_id'] = structure.get('interface_id')
-            self.path_structure['backbone_path_id'] = structure.get('backbone_path_id')
-            self.path_structure['backbone_utilization'] = structure.get('backbone_utilization', 0.0)
-            self.path_structure['access_length'] = structure.get('access_length', 0)
-            self.path_structure['backbone_length'] = structure.get('backbone_length', 0)
-            self.path_structure['total_length'] = structure.get('total_length', 0)
-        elif structure.get('type') == 'backbone_only':
-            self.path_structure['uses_backbone'] = True
-            self.path_structure['interface_id'] = structure.get('interface_id')
-            self.path_structure['backbone_path_id'] = structure.get('backbone_path_id')
-            self.path_structure['backbone_utilization'] = 1.0
-        elif structure.get('type') == 'direct':
-            self.path_structure['uses_backbone'] = False
-            self.path_structure['backbone_utilization'] = 0.0
-            if self.path:
-                self.path_structure['total_length'] = len(self.path)
-        
-        # 设置最终质量评分
-        if 'final_quality' in structure:
-            self.quality_score = structure['final_quality']
+    def get_performance_metrics(self) -> Dict:
+        """获取任务性能指标"""
+        return {
+            'planning_time': self.planning_time,
+            'execution_time': self.actual_duration,
+            'quality_score': self.quality_score,
+            'deadline_met': self.deadline is None or self.completion_time <= self.deadline,
+            'interface_count': len(self.reserved_interfaces),
+            'path_type': self.path_structure.get('type', 'unknown')
+        }
 
+@dataclass
+class VehicleState:
+    """增强的车辆状态"""
+    vehicle_id: str
+    status: VehicleStatus = VehicleStatus.IDLE
+    position: Tuple[float, float, float] = (0, 0, 0)
+    
+    # 基本属性
+    max_load: float = 100
+    current_load: float = 0
+    speed: float = 1.0
+    
+    # 任务相关
+    current_task: Optional[str] = None
+    task_queue: List[str] = field(default_factory=list)
+    completed_tasks: int = 0
+    
+    # 性能统计
+    total_distance: float = 0
+    total_time: float = 0
+    idle_time: float = 0
+    utilization_rate: float = 0
+    
+    # 偏好和历史
+    preferred_loading_points: List[int] = field(default_factory=list)
+    preferred_unloading_points: List[int] = field(default_factory=list)
+    performance_history: List[Dict] = field(default_factory=list)
+    
+    # 接口使用统计
+    backbone_usage_count: int = 0
+    direct_path_count: int = 0
+    interface_efficiency: float = 0.5
+    
+    def update_utilization(self, time_delta: float):
+        """更新利用率"""
+        if self.status != VehicleStatus.IDLE:
+            self.total_time += time_delta
+        else:
+            self.idle_time += time_delta
+        
+        total_elapsed = self.total_time + self.idle_time
+        if total_elapsed > 0:
+            self.utilization_rate = self.total_time / total_elapsed
+    
+    def add_performance_record(self, task_metrics: Dict):
+        """添加性能记录"""
+        record = {
+            'timestamp': time.time(),
+            'task_metrics': task_metrics,
+            'position': self.position,
+            'utilization': self.utilization_rate
+        }
+        
+        self.performance_history.append(record)
+        
+        # 限制历史记录长度
+        if len(self.performance_history) > 100:
+            self.performance_history = self.performance_history[-100:]
 
-class SimplifiedVehicleScheduler:
-    """
-    简化的车辆调度器 - 按照用户设计理念重新实现
+class IntelligentTaskAssigner:
+    """智能任务分配器"""
     
-    设计理念：
-    1. 简化路径规划调用，直接使用新的骨干网络接口
-    2. 移除复杂的路径结构分析
-    3. 保留核心的任务管理和调度功能
-    4. 优化与简化的组件集成
-    """
-    
-    def __init__(self, env, path_planner=None, backbone_network=None, traffic_manager=None):
+    def __init__(self, env, backbone_network):
         self.env = env
-        self.path_planner = path_planner
         self.backbone_network = backbone_network
-        self.traffic_manager = traffic_manager
         
-        self.tasks = {}  # 任务字典 {task_id: task}
-        self.task_queues = {}  # 车辆任务队列 {vehicle_id: [task_ids]}
-        self.vehicle_statuses = {}  # 车辆状态 {vehicle_id: status}
-        self.task_counter = 0  # 任务计数器
-        self.mission_templates = {}  # 任务模板 {template_id: [tasks]}
-        
-        # 统计信息
-        self.stats = {
-            'completed_tasks': 0,
-            'failed_tasks': 0,
-            'total_distance': 0,
-            'total_time': 0,
-            'vehicle_utilization': {},
-            'backbone_usage_efficiency': 0.0,
-            'conflict_resolution_count': 0,
-            'backbone_assisted_paths': 0,
-            'direct_paths': 0
+        # 分配策略权重
+        self.assignment_weights = {
+            'distance': 0.25,
+            'vehicle_utilization': 0.20,
+            'interface_efficiency': 0.20,
+            'load_compatibility': 0.15,
+            'historical_performance': 0.10,
+            'deadline_urgency': 0.10
         }
         
-        # 点位使用情况跟踪
-        self.loading_point_usage = {}  # {point_id: usage_count}
-        self.unloading_point_usage = {}  # {point_id: usage_count}
-        
-        # 调度配置
-        self.scheduling_config = {
-            'enable_backbone_priority': True,
-            'max_task_queue_length': 5,
-            'task_timeout': 300,  # 5分钟超时
-            'enable_quality_tracking': True
-        }
-        
-        print("初始化简化的车辆调度器")
+        # 智能学习参数
+        self.learning_rate = 0.1
+        self.performance_memory = defaultdict(list)
     
-    def set_path_planner(self, path_planner):
-        """设置路径规划器"""
-        self.path_planner = path_planner
-        if self.path_planner and self.backbone_network:
-            self.path_planner.set_backbone_network(self.backbone_network)
-        print("已设置路径规划器")
-    
-    def set_backbone_network(self, backbone_network):
-        """设置骨干路径网络"""
-        self.backbone_network = backbone_network
-        if self.path_planner:
-            self.path_planner.set_backbone_network(backbone_network)
-        print("已设置骨干路径网络")
-    
-    def set_traffic_manager(self, traffic_manager):
-        """设置交通管理器"""
-        self.traffic_manager = traffic_manager
-    
-    def initialize_vehicles(self):
-        """初始化车辆状态"""
-        for vehicle_id, vehicle in self.env.vehicles.items():
-            self.vehicle_statuses[vehicle_id] = {
-                'status': 'idle',
-                'position': vehicle.get('position', (0, 0, 0)),
-                'load': 0,
-                'max_load': vehicle.get('max_load', 100),
-                'current_task': None,
-                'completed_tasks': 0,
-                'total_distance': 0,
-                'total_time': 0,
-                'utilization_rate': 0.0,
-                'active_time': 0,
-                'idle_time': 0,
-                'preferred_loading_point': None,
-                'preferred_unloading_point': None,
-                'task_queue': [],  # 详细任务队列信息
-                'backbone_usage_count': 0,  # 使用骨干路径次数
-                'direct_path_count': 0  # 直接路径次数
-            }
-            
-            # 初始化任务队列
-            self.task_queues[vehicle_id] = []
-    
-    def create_mission_template(self, template_id, loading_point=None, unloading_point=None):
-        """创建任务模板（装载-卸载-返回循环）"""
-        loading_point_id = None
-        unloading_point_id = None
-        
-        # 处理装载点
-        if loading_point is not None:
-            if isinstance(loading_point, int):
-                loading_point_id = loading_point
-                if 0 <= loading_point_id < len(self.env.loading_points):
-                    loading_point = self.env.loading_points[loading_point_id]
-                else:
-                    loading_point = None
-            else:
-                for i, point in enumerate(self.env.loading_points):
-                    if point == loading_point:
-                        loading_point_id = i
-                        break
-        
-        if loading_point is None and self.env.loading_points:
-            loading_point = self.env.loading_points[0]
-            loading_point_id = 0
-        
-        # 处理卸载点
-        if unloading_point is not None:
-            if isinstance(unloading_point, int):
-                unloading_point_id = unloading_point
-                if 0 <= unloading_point_id < len(self.env.unloading_points):
-                    unloading_point = self.env.unloading_points[unloading_point_id]
-                else:
-                    unloading_point = None
-            else:
-                for i, point in enumerate(self.env.unloading_points):
-                    if point == unloading_point:
-                        unloading_point_id = i
-                        break
-        
-        if unloading_point is None and self.env.unloading_points:
-            unloading_point = self.env.unloading_points[0]
-            unloading_point_id = 0
-        
-        if not loading_point or not unloading_point:
-            return False
-        
-        # 创建三段任务模板
-        template = [
-            {
-                'task_type': 'to_loading',
-                'goal': (loading_point[0], loading_point[1], 0),
-                'priority': 2,
-                'loading_point_id': loading_point_id,
-                'unloading_point_id': unloading_point_id
-            },
-            {
-                'task_type': 'to_unloading',
-                'goal': (unloading_point[0], unloading_point[1], 0),
-                'priority': 3,
-                'loading_point_id': loading_point_id,
-                'unloading_point_id': unloading_point_id
-            },
-            {
-                'task_type': 'to_initial',
-                'goal': None,  # 将在分配时设置为车辆初始位置
-                'priority': 1,
-                'loading_point_id': loading_point_id,
-                'unloading_point_id': unloading_point_id
-            }
-        ]
-        
-        self.mission_templates[template_id] = template
-        return True
-    
-    def create_mission_with_specific_points(self, template_id, loading_point_id, unloading_point_id):
-        """创建使用特定装载点和卸载点的任务模板"""
-        if loading_point_id < 0 or loading_point_id >= len(self.env.loading_points):
-            return False
-        
-        if unloading_point_id < 0 or unloading_point_id >= len(self.env.unloading_points):
-            return False
-        
-        loading_point = self.env.loading_points[loading_point_id]
-        unloading_point = self.env.unloading_points[unloading_point_id]
-        
-        return self.create_mission_template(template_id, loading_point, unloading_point)
-    
-    def assign_mission(self, vehicle_id, template_id):
-        """为车辆分配任务模板"""
-        if vehicle_id not in self.vehicle_statuses:
-            return False
-        
-        if template_id not in self.mission_templates:
-            return False
-        
-        # 获取模板
-        template = self.mission_templates[template_id]
-        
-        # 获取车辆信息
-        vehicle = self.env.vehicles.get(vehicle_id)
-        if not vehicle:
-            return False
-        
-        initial_position = vehicle.get('initial_position')
-        if not initial_position:
-            initial_position = vehicle.get('position', (0, 0, 0))
-        
-        # 创建任务并添加到队列
-        current_position = self.vehicle_statuses[vehicle_id]['position']
-        
-        for task_template in template:
-            task_id = f"task_{self.task_counter}"
-            self.task_counter += 1
-            
-            # 创建任务
-            task = VehicleTask(
-                task_id,
-                task_template['task_type'],
-                current_position,
-                task_template['goal'] if task_template['goal'] else initial_position,
-                task_template['priority'],
-                task_template.get('loading_point_id'),
-                task_template.get('unloading_point_id')
-            )
-            
-            # 更新下一任务的起点
-            current_position = task.goal
-            
-            # 添加到任务字典
-            self.tasks[task_id] = task
-            
-            # 添加到车辆任务队列
-            self.task_queues[vehicle_id].append(task_id)
-            
-            # 更新车辆状态中的任务队列信息
-            self.vehicle_statuses[vehicle_id]['task_queue'].append({
-                'task_id': task_id,
-                'task_type': task.task_type,
-                'start': task.start,
-                'goal': task.goal,
-                'priority': task.priority
-            })
-            
-            # 更新点位使用情况
-            if task.loading_point_id is not None:
-                self.loading_point_usage[task.loading_point_id] = \
-                    self.loading_point_usage.get(task.loading_point_id, 0) + 1
-            
-            if task.unloading_point_id is not None:
-                self.unloading_point_usage[task.unloading_point_id] = \
-                    self.unloading_point_usage.get(task.unloading_point_id, 0) + 1
-        
-        # 如果车辆空闲，立即开始执行任务
-        if self.vehicle_statuses[vehicle_id]['status'] == 'idle':
-            self._start_next_task(vehicle_id)
-        
-        return True
-    
-    def assign_optimal_mission(self, vehicle_id):
-        """基于距离、负载等因素为车辆分配最优任务"""
-        if vehicle_id not in self.vehicle_statuses:
-            return False
-        
-        vehicle_pos = self.vehicle_statuses[vehicle_id]['position']
-        vehicle_load = self.vehicle_statuses[vehicle_id]['load']
-        vehicle_max_load = self.vehicle_statuses[vehicle_id]['max_load']
-        
-        # 创建唯一的模板ID
-        template_id = f"optimal_mission_{vehicle_id}_{self.task_counter}"
-        
-        # 根据负载情况分配任务
-        if vehicle_load < vehicle_max_load * 0.5:
-            best_loading_id = self._find_optimal_loading_point(vehicle_id, vehicle_pos)
-            best_unloading_id = self._find_optimal_unloading_point(vehicle_id)
-        else:
-            best_unloading_id = self._find_optimal_unloading_point(vehicle_id, vehicle_pos)
-            best_loading_id = self._find_optimal_loading_point(vehicle_id)
-        
-        # 创建并分配任务模板
-        if self.create_mission_with_specific_points(template_id, best_loading_id, best_unloading_id):
-            return self.assign_mission(vehicle_id, template_id)
-        
-        return False
-    
-    def _find_optimal_loading_point(self, vehicle_id, position=None):
-        """寻找最优装载点"""
-        if not self.env.loading_points:
-            return 0
-        
-        if position is None and vehicle_id in self.vehicle_statuses:
-            position = self.vehicle_statuses[vehicle_id]['position']
-        
-        # 如果车辆有首选装载点，优先使用
-        if (vehicle_id in self.vehicle_statuses and 
-            self.vehicle_statuses[vehicle_id]['preferred_loading_point'] is not None):
-            return self.vehicle_statuses[vehicle_id]['preferred_loading_point']
-        
-        best_point_id = 0
-        best_score = float('-inf')
-        
-        for i, point in enumerate(self.env.loading_points):
-            # 计算距离分数
-            distance = self._calculate_distance(position, point)
-            distance_score = 1000 / (distance + 1)
-            
-            # 计算使用情况分数
-            usage_count = self.loading_point_usage.get(i, 0)
-            usage_score = 1000 / (usage_count + 1)
-            
-            # 检查骨干网络可达性加分
-            backbone_score = 1.0
-            if self.backbone_network:
-                # 简化检查：如果有到该装载点的骨干路径，加分
-                target_type, target_id = self.backbone_network.identify_target_point(point)
-                if target_type == 'loading' and target_id == i:
-                    paths_to_target = self.backbone_network.find_paths_to_target('loading', i)
-                    if paths_to_target:
-                        backbone_score = 1.2
-            
-            # 总分
-            score = distance_score * 0.6 + usage_score * 0.3 + backbone_score * 0.1
-            
-            if score > best_score:
-                best_score = score
-                best_point_id = i
-        
-        return best_point_id
-    
-    def _find_optimal_unloading_point(self, vehicle_id, position=None):
-        """寻找最优卸载点"""
-        if not self.env.unloading_points:
-            return 0
-        
-        if position is None and vehicle_id in self.vehicle_statuses:
-            position = self.vehicle_statuses[vehicle_id]['position']
-        
-        # 如果车辆有首选卸载点，优先使用
-        if (vehicle_id in self.vehicle_statuses and 
-            self.vehicle_statuses[vehicle_id]['preferred_unloading_point'] is not None):
-            return self.vehicle_statuses[vehicle_id]['preferred_unloading_point']
-        
-        best_point_id = 0
-        best_score = float('-inf')
-        
-        for i, point in enumerate(self.env.unloading_points):
-            # 计算距离分数
-            distance = self._calculate_distance(position, point)
-            distance_score = 1000 / (distance + 1)
-            
-            # 计算使用情况分数
-            usage_count = self.unloading_point_usage.get(i, 0)
-            usage_score = 1000 / (usage_count + 1)
-            
-            # 检查骨干网络可达性
-            backbone_score = 1.0
-            if self.backbone_network:
-                target_type, target_id = self.backbone_network.identify_target_point(point)
-                if target_type == 'unloading' and target_id == i:
-                    paths_to_target = self.backbone_network.find_paths_to_target('unloading', i)
-                    if paths_to_target:
-                        backbone_score = 1.2
-            
-            # 总分
-            score = distance_score * 0.6 + usage_score * 0.3 + backbone_score * 0.1
-            
-            if score > best_score:
-                best_score = score
-                best_point_id = i
-        
-        return best_point_id
-    
-    def _start_next_task(self, vehicle_id):
-        """开始执行车辆的下一个任务 - 接口系统版"""
-        if vehicle_id not in self.task_queues or not self.task_queues[vehicle_id]:
-            return False
-        
-        # 获取下一个任务
-        task_id = self.task_queues[vehicle_id][0]
-        task = self.tasks[task_id]
-        
-        # 更新任务状态
-        task.status = 'in_progress'
-        task.assigned_vehicle = vehicle_id
-        task.start_time = self.env.current_time if hasattr(self.env, 'current_time') else 0
-        
-        # 更新车辆状态
-        self.vehicle_statuses[vehicle_id]['status'] = 'moving'
-        self.vehicle_statuses[vehicle_id]['current_task'] = task_id
-        
-        if vehicle_id in self.env.vehicles:
-            self.env.vehicles[vehicle_id]['status'] = 'moving'
-        
-        # 规划路径 - 使用接口系统
-        if self.path_planner:
-            path_result = self._plan_vehicle_path_with_interface(
-                vehicle_id,
-                self.vehicle_statuses[vehicle_id]['position'],
-                task.goal
-            )
-            
-            if path_result:
-                if isinstance(path_result, tuple) and len(path_result) == 2:
-                    task.path, structure = path_result
-                    task.update_path_structure(structure)
-                    
-                    # 如果使用了接口，进行预约
-                    if structure.get('interface_id'):
-                        success = task.reserve_interface(
-                            structure['interface_id'], 
-                            self.backbone_network,
-                            duration=120  # 预约2分钟
-                        )
-                        if not success:
-                            print(f"警告: 接口 {structure['interface_id']} 预约失败")
-                    
-                    # 更新统计信息
-                    if structure.get('type') in ['interface_assisted', 'backbone_only']:
-                        self.stats['backbone_assisted_paths'] += 1
-                        self.vehicle_statuses[vehicle_id]['backbone_usage_count'] += 1
-                    else:
-                        self.stats['direct_paths'] += 1
-                        self.vehicle_statuses[vehicle_id]['direct_path_count'] += 1
-                else:
-                    task.path = path_result
-                    task.update_path_structure({'type': 'direct'})
-                    self.stats['direct_paths'] += 1
-                    self.vehicle_statuses[vehicle_id]['direct_path_count'] += 1
-                
-                # 更新车辆路径信息
-                if vehicle_id in self.env.vehicles and task.path:
-                    self.env.vehicles[vehicle_id]['path'] = task.path
-                    self.env.vehicles[vehicle_id]['path_index'] = 0
-                    self.env.vehicles[vehicle_id]['progress'] = 0.0
-                    self.env.vehicles[vehicle_id]['path_structure'] = task.path_structure
-                    
-                    # 向交通管理器注册路径
-                    if self.traffic_manager:
-                        self.traffic_manager.register_vehicle_path(
-                            vehicle_id, task.path, task.start_time
-                        )
-                        
-                print(f"车辆 {vehicle_id} 开始任务 {task_id}，"
-                      f"路径类型: {task.path_structure.get('type', 'unknown')}，"
-                      f"接口: {task.path_structure.get('interface_id', 'N/A')}")
-        
-        return True
-    def _plan_vehicle_path_with_interface(self, vehicle_id, start, goal):
-        """使用新接口系统为车辆规划路径"""
-        if not self.path_planner:
+    def assign_task_to_vehicle(self, task: EnhancedVehicleTask, 
+                              available_vehicles: Dict[str, VehicleState]) -> Optional[str]:
+        """智能任务分配"""
+        if not available_vehicles:
             return None
         
-        try:
-            # 使用新的接口系统规划路径
-            result = self.path_planner.plan_path(vehicle_id, start, goal, use_backbone=True)
-            
-            if result and isinstance(result, tuple) and len(result) == 2:
-                path, structure = result
-                
-                # 检查是否使用了新的接口系统
-                if structure.get('type') in ['backbone_only', 'interface_assisted']:
-                    print(f"车辆 {vehicle_id} 使用新接口系统: {structure.get('interface_id')}")
-                
-                return result
-            
-            return result
-            
-        except Exception as e:
-            print(f"车辆 {vehicle_id} 新接口路径规划失败: {e}")
-            return None
-    
-    def _plan_vehicle_path(self, vehicle_id, start, goal):
-        """
-        为车辆规划路径 - 简化版
-        直接使用新的路径规划器接口
-        """
-        if not self.path_planner:
-            return None
-        
-        try:
-            # 使用简化的路径规划接口
-            if hasattr(self.path_planner, 'plan_path_with_backbone'):
-                # 优先使用专用接口
-                result = self.path_planner.plan_path_with_backbone(vehicle_id, start, goal)
-            else:
-                # 使用通用接口
-                result = self.path_planner.plan_path(vehicle_id, start, goal, use_backbone=True)
-            
-            return result
-            
-        except Exception as e:
-            print(f"车辆 {vehicle_id} 路径规划失败: {e}")
-            return None
-    
-    def update(self, time_delta):
-        """更新所有车辆状态和任务进度"""
-        for vehicle_id, status in self.vehicle_statuses.items():
-            self._update_vehicle(vehicle_id, time_delta)
-    
-    def _update_vehicle(self, vehicle_id, time_delta):
-        """更新单个车辆状态"""
-        if vehicle_id not in self.vehicle_statuses:
-            return
-        
-        status = self.vehicle_statuses[vehicle_id]
-        
-        # 更新时间统计
-        if status['status'] == 'idle':
-            status['idle_time'] += time_delta
-        else:
-            status['active_time'] += time_delta
-        
-        # 计算利用率
-        total_time = status['active_time'] + status['idle_time']
-        if total_time > 0:
-            status['utilization_rate'] = status['active_time'] / total_time
-        
-        # 更新车辆位置和状态
-        vehicle = self.env.vehicles.get(vehicle_id)
-        if not vehicle:
-            return
-        
-        # 获取当前任务
-        current_task_id = status['current_task']
-        if not current_task_id or current_task_id not in self.tasks:
-            # 如果没有当前任务，但有待执行任务，开始下一个任务
-            if self.task_queues.get(vehicle_id) and status['status'] == 'idle':
-                self._start_next_task(vehicle_id)
-            return
-        
-        current_task = self.tasks[current_task_id]
-        
-        # 根据状态更新
-        if status['status'] == 'moving':
-            self._update_moving_vehicle(vehicle_id, vehicle, current_task, time_delta)
-        elif status['status'] == 'loading':
-            self._update_loading_vehicle(vehicle_id, vehicle, current_task, time_delta)
-        elif status['status'] == 'unloading':
-            self._update_unloading_vehicle(vehicle_id, vehicle, current_task, time_delta)
-    
-    def _update_moving_vehicle(self, vehicle_id, vehicle, current_task, time_delta):
-        """更新移动中的车辆"""
-        if 'path' in vehicle and vehicle['path']:
-            path_index = vehicle.get('path_index', 0)
-            path = vehicle['path']
-            
-            if path_index >= len(path):
-                # 到达目标
-                self._handle_task_completion(vehicle_id, current_task.task_id)
-            else:
-                # 更新路径进度
-                progress = vehicle.get('progress', 0.0)
-                speed = 1.0  # 基础速度
-                
-                # 根据路径质量调整速度
-                if current_task.quality_score > 0:
-                    speed *= (0.8 + 0.4 * current_task.quality_score)
-                
-                progress += (speed * time_delta * 0.05)
-                
-                if progress >= 1.0:
-                    # 移动到下一个路径点
-                    path_index += 1
-                    progress = 0.0
-                    
-                    if path_index >= len(path):
-                        # 到达目标
-                        status = self.vehicle_statuses[vehicle_id]
-                        status['position'] = current_task.goal
-                        vehicle['position'] = current_task.goal
-                        self._handle_task_completion(vehicle_id, current_task.task_id)
-                    else:
-                        # 更新位置到新的路径点
-                        status = self.vehicle_statuses[vehicle_id]
-                        status['position'] = path[path_index]
-                        vehicle['position'] = path[path_index]
-                        vehicle['path_index'] = path_index
-                        vehicle['progress'] = progress
-                        
-                        # 确保状态保持moving
-                        if vehicle['status'] != 'moving':
-                            vehicle['status'] = 'moving'
-                            status['status'] = 'moving'
-                else:
-                    # 在当前路径段内插值计算位置
-                    self._interpolate_position(vehicle_id, vehicle, path, path_index, progress)
-                
-                # 更新任务进度
-                path_length = len(path)
-                current_task.progress = min(1.0, (path_index + progress) / path_length)
-    
-    def _interpolate_position(self, vehicle_id, vehicle, path, path_index, progress):
-        """在路径段内插值计算位置"""
-        current_point = path[path_index]
-        next_point = path[path_index + 1] if path_index + 1 < len(path) else current_point
-        
-        # 线性插值
-        x = current_point[0] + (next_point[0] - current_point[0]) * progress
-        y = current_point[1] + (next_point[1] - current_point[1]) * progress
-        
-        # 计算朝向角度
-        dx = next_point[0] - current_point[0]
-        dy = next_point[1] - current_point[1]
-        if abs(dx) > 0.001 or abs(dy) > 0.001:
-            theta = math.atan2(dy, dx)
-        else:
-            theta = current_point[2] if len(current_point) > 2 else 0
-        
-        # 更新位置
-        status = self.vehicle_statuses[vehicle_id]
-        status['position'] = (x, y, theta)
-        vehicle['position'] = status['position']
-        vehicle['progress'] = progress
-    
-    def _update_loading_vehicle(self, vehicle_id, vehicle, current_task, time_delta):
-        """更新正在装载的车辆"""
-        loading_time = 50  # 装载时间
-        vehicle['loading_progress'] = vehicle.get('loading_progress', 0) + time_delta
-        
-        if vehicle['loading_progress'] >= loading_time:
-            # 装载完成
-            status = self.vehicle_statuses[vehicle_id]
-            status['load'] = status['max_load']
-            vehicle['load'] = status['max_load']
-            
-            # 完成当前任务
-            self._complete_task(vehicle_id, current_task.task_id)
-            
-            # 开始下一个任务
-            self._start_next_task(vehicle_id)
-    
-    def _update_unloading_vehicle(self, vehicle_id, vehicle, current_task, time_delta):
-        """更新正在卸载的车辆"""
-        unloading_time = 30  # 卸载时间
-        vehicle['unloading_progress'] = vehicle.get('unloading_progress', 0) + time_delta
-        
-        if vehicle['unloading_progress'] >= unloading_time:
-            # 卸载完成
-            status = self.vehicle_statuses[vehicle_id]
-            status['load'] = 0
-            vehicle['load'] = 0
-            
-            # 完成当前任务
-            self._complete_task(vehicle_id, current_task.task_id)
-            
-            # 开始下一个任务
-            self._start_next_task(vehicle_id)
-    
-    def _handle_task_completion(self, vehicle_id, task_id):
-        """处理任务完成"""
-        if task_id not in self.tasks or vehicle_id not in self.vehicle_statuses:
-            return
-        
-        task = self.tasks[task_id]
-        status = self.vehicle_statuses[vehicle_id]
-        
-        # 根据任务类型执行不同操作
-        if task.task_type == 'to_loading':
-            # 到达装载点，开始装载
-            status['status'] = 'loading'
-            if vehicle_id in self.env.vehicles:
-                self.env.vehicles[vehicle_id]['status'] = 'loading'
-                self.env.vehicles[vehicle_id]['loading_progress'] = 0
-            
-            # 记录使用的装载点
-            if task.loading_point_id is not None:
-                status['preferred_loading_point'] = task.loading_point_id
-        
-        elif task.task_type == 'to_unloading':
-            # 到达卸载点，开始卸载
-            status['status'] = 'unloading'
-            if vehicle_id in self.env.vehicles:
-                self.env.vehicles[vehicle_id]['status'] = 'unloading'
-                self.env.vehicles[vehicle_id]['unloading_progress'] = 0
-            
-            # 记录使用的卸载点
-            if task.unloading_point_id is not None:
-                status['preferred_unloading_point'] = task.unloading_point_id
-        
-        elif task.task_type == 'to_initial':
-            # 返回起点，完成循环
-            self._complete_task(vehicle_id, task_id)
-            
-            # 更新完成循环计数
-            if vehicle_id in self.env.vehicles:
-                self.env.vehicles[vehicle_id]['completed_cycles'] = \
-                    self.env.vehicles[vehicle_id].get('completed_cycles', 0) + 1
-            
-            # 处理下一轮任务
-            self._handle_cycle_completion(vehicle_id)
-    
-    def _handle_cycle_completion(self, vehicle_id):
-        """处理循环完成"""
-        if vehicle_id in self.task_queues:
-            # 移除已完成的任务
-            if self.task_queues[vehicle_id]:
-                self.task_queues[vehicle_id].pop(0)
-            
-            # 如果还有任务模板，添加新循环
-            if self.mission_templates:
-                template_id = list(self.mission_templates.keys())[0]
-                self.assign_mission(vehicle_id, template_id)
-            
-            # 开始下一个任务
-            if self.task_queues[vehicle_id]:
-                self._start_next_task(vehicle_id)
-            else:
-                # 没有更多任务，车辆空闲
-                status = self.vehicle_statuses[vehicle_id]
-                status['status'] = 'idle'
-                status['current_task'] = None
-                if vehicle_id in self.env.vehicles:
-                    self.env.vehicles[vehicle_id]['status'] = 'idle'
-    
-    def _complete_task(self, vehicle_id, task_id):
-        """完成任务并释放接口"""
-        if task_id not in self.tasks:
-            return
-        
-        task = self.tasks[task_id]
-        
-        # 释放接口预约
-        if self.backbone_network:
-            task.release_interface(self.backbone_network)
-        
-        # 更新任务状态
-        task.status = 'completed'
-        task.progress = 1.0
-        task.completion_time = self.env.current_time if hasattr(self.env, 'current_time') else 0
-        
-        # 更新统计信息
-        self.stats['completed_tasks'] += 1
-        
-        if task.path:
-            path_length = self._calculate_distance_path(task.path)
-            self.stats['total_distance'] += path_length
-            self.vehicle_statuses[vehicle_id]['total_distance'] += path_length
-        
-        self.vehicle_statuses[vehicle_id]['completed_tasks'] += 1
-        
-        # 从任务队列中移除
-        if self.task_queues[vehicle_id] and self.task_queues[vehicle_id][0] == task_id:
-            self.task_queues[vehicle_id].pop(0)
-            if self.vehicle_statuses[vehicle_id]['task_queue']:
-                self.vehicle_statuses[vehicle_id]['task_queue'].pop(0)
-        
-        # 释放交通管理器中的路径
-        if self.traffic_manager:
-            self.traffic_manager.release_vehicle_path(vehicle_id)
-        
-        print(f"任务 {task_id} 完成，车辆 {vehicle_id}，"
-              f"使用接口: {task.path_structure.get('interface_id', 'N/A')}")
-    
-    def get_vehicle_info(self, vehicle_id):
-        """获取车辆详细信息"""
-        if vehicle_id not in self.vehicle_statuses:
-            return None
-        
-        info = self.vehicle_statuses[vehicle_id].copy()
-        
-        # 添加当前任务信息
-        if info['current_task'] and info['current_task'] in self.tasks:
-            task = self.tasks[info['current_task']]
-            task_info = task.to_dict()
-            
-            # 添加简化的路径结构信息
-            if task.path_structure:
-                task_info['path_structure'] = {
-                    'type': task.path_structure.get('type', 'unknown'),
-                    'uses_backbone': task.path_structure.get('uses_backbone', False),
-                    'backbone_utilization': task.path_structure.get('backbone_utilization', 0.0),
-                    'backbone_path_id': task.path_structure.get('backbone_path_id'),
-                    'total_length': task.path_structure.get('total_length', 0)
-                }
-            
-            info['current_task_info'] = task_info
-        
-        return info
-    
-    def get_stats(self):
-        """获取调度统计信息"""
-        # 更新最新统计数据
-        for vehicle_id, status in self.vehicle_statuses.items():
-            self.stats['vehicle_utilization'][vehicle_id] = status['utilization_rate']
-        
-        # 计算全局利用率
-        if self.vehicle_statuses:
-            total_utilization = sum(self.stats['vehicle_utilization'].values())
-            self.stats['average_utilization'] = total_utilization / len(self.vehicle_statuses)
-        
-        # 计算骨干网络使用效率
-        total_paths = self.stats['backbone_assisted_paths'] + self.stats['direct_paths']
-        if total_paths > 0:
-            self.stats['backbone_usage_efficiency'] = self.stats['backbone_assisted_paths'] / total_paths
-        
-        # 计算车辆级别的骨干使用统计
-        backbone_usage_by_vehicle = {}
-        for vehicle_id, status in self.vehicle_statuses.items():
-            total_vehicle_paths = status['backbone_usage_count'] + status['direct_path_count']
-            if total_vehicle_paths > 0:
-                backbone_usage_by_vehicle[vehicle_id] = status['backbone_usage_count'] / total_vehicle_paths
-            else:
-                backbone_usage_by_vehicle[vehicle_id] = 0.0
-        
-        self.stats['backbone_usage_by_vehicle'] = backbone_usage_by_vehicle
-        
-        return self.stats
-    
-    def _calculate_distance(self, pos1, pos2):
-        """计算两点之间的欧几里得距离"""
-        x1 = pos1[0] if len(pos1) > 0 else 0
-        y1 = pos1[1] if len(pos1) > 1 else 0
-        x2 = pos2[0] if len(pos2) > 0 else 0
-        y2 = pos2[1] if len(pos2) > 1 else 0
-        
-        return math.sqrt((x1 - x2)**2 + (y1 - y2)**2)
-    
-    def _calculate_distance_path(self, path):
-        """计算路径总长度"""
-        if not path or len(path) < 2:
-            return 0
-        
-        length = 0
-        for i in range(len(path) - 1):
-            length += self._calculate_distance(path[i], path[i + 1])
-        
-        return length
-
-
-class SimplifiedECBSVehicleScheduler(SimplifiedVehicleScheduler):
-    """简化的ECBS增强版车辆调度器"""
-    
-    def __init__(self, env, path_planner=None, traffic_manager=None, backbone_network=None):
-        super().__init__(env, path_planner, backbone_network, traffic_manager)
-        
-        # ECBS特有属性
-        self.vehicle_priorities = {}  # 车辆优先级
-        self.task_priorities = {}     # 任务优先级
-        self.conflict_counts = {}     # 车辆冲突计数
-        
-        # 冲突解决策略
-        self.conflict_resolution_strategy = 'ecbs'
-        
-        # 批量规划参数
-        self.batch_planning = True
-        self.max_batch_size = 8
-        self.planning_horizon = 100.0
-        
-        print("初始化简化的ECBS车辆调度器")
-    
-    def initialize_vehicles(self):
-        """初始化车辆状态，并设置初始优先级"""
-        super().initialize_vehicles()
-        
-        # 根据车辆ID设置初始优先级
-        for i, vehicle_id in enumerate(self.vehicle_statuses.keys()):
-            self.vehicle_priorities[vehicle_id] = len(self.vehicle_statuses) - i
-            self.conflict_counts[vehicle_id] = 0
-    
-    def assign_tasks_batch(self, tasks_batch):
-        """使用ECBS原理批量分配任务"""
-        if not tasks_batch:
-            return {}
-        
-        # 按优先级排序任务
-        sorted_tasks = sorted(
-            tasks_batch, 
-            key=lambda t: self.task_priorities.get(t.task_id, 1),
-            reverse=True
-        )
-        
-        # 初始化分配结果
-        assignments = {}
-        
-        # 为每个任务找到最佳车辆
-        for task in sorted_tasks:
-            best_vehicle = self._find_best_vehicle_for_task(task)
-            
-            if best_vehicle:
-                assignments[best_vehicle] = task.task_id
-                self.assign_task(best_vehicle, task.task_id)
-        
-        # 如果设置了批量规划，为所有分配的车辆规划协调路径
-        if self.batch_planning and assignments:
-            vehicle_ids = list(assignments.keys())
-            self._plan_coordinated_paths(vehicle_ids)
-        
-        return assignments
-    
-    def assign_task(self, vehicle_id, task_id):
-        """分配单个任务给车辆"""
-        if vehicle_id not in self.vehicle_statuses or task_id not in self.tasks:
-            return False
-        
-        # 标记任务为已分配
-        task = self.tasks[task_id]
-        task.status = 'assigned'
-        task.assigned_vehicle = vehicle_id
-        
-        # 添加任务到车辆队列
-        if vehicle_id not in self.task_queues:
-            self.task_queues[vehicle_id] = []
-        
-        self.task_queues[vehicle_id].append(task_id)
-        
-        # 如果车辆空闲，立即开始任务
-        if self.vehicle_statuses[vehicle_id]['status'] == 'idle':
-            self._start_next_task(vehicle_id)
-        
-        return True
-    
-    def _find_best_vehicle_for_task(self, task):
-        """为任务找到最佳车辆"""
         best_vehicle = None
-        best_score = float('-inf')
+        best_score = -float('inf')
         
-        for vehicle_id, status in self.vehicle_statuses.items():
-            # 如果车辆任务过多，跳过
-            if vehicle_id in self.task_queues and len(self.task_queues[vehicle_id]) > 3:
-                continue
-            
-            # 计算综合评分
-            distance = self._calculate_distance(status['position'], task.start)
-            distance_score = 1000 / (distance + 10)
-            
-            # 负载匹配度
-            load_factor = self._calculate_load_factor(task, status)
-            
-            # 优先级因素
-            priority_factor = self.vehicle_priorities.get(vehicle_id, 1) / 10.0
-            
-            # 冲突历史因素
-            conflict_factor = 1.0 / (1.0 + 0.1 * self.conflict_counts.get(vehicle_id, 0))
-            
-            # 点位偏好匹配
-            preference_factor = self._calculate_preference_factor(task, status)
-            
-            # 骨干网络使用偏好
-            backbone_factor = 1.0
-            if self.backbone_network and task.goal:
-                target_type, target_id = self.backbone_network.identify_target_point(task.goal)
-                if target_type:
-                    paths = self.backbone_network.find_paths_to_target(target_type, target_id)
-                    if paths:
-                        backbone_factor = 1.1  # 有骨干路径可用，轻微加分
-            
-            # 总分
-            score = (distance_score * 0.25 + load_factor * 0.2 + 
-                    priority_factor * 0.2 + conflict_factor * 0.15 + 
-                    preference_factor * 0.1 + backbone_factor * 0.1)
-            
-            # 空闲车辆加分
-            if status['status'] == 'idle':
-                score *= 1.3
+        for vehicle_id, vehicle_state in available_vehicles.items():
+            score = self._calculate_assignment_score(task, vehicle_state)
             
             if score > best_score:
                 best_score = score
                 best_vehicle = vehicle_id
         
+        # 记录分配决策
+        if best_vehicle:
+            self._record_assignment_decision(task, best_vehicle, best_score)
+        
         return best_vehicle
     
-    def _calculate_load_factor(self, task, status):
-        """计算负载匹配因子"""
-        load_ratio = status['load'] / status['max_load']
+    def _calculate_assignment_score(self, task: EnhancedVehicleTask, 
+                                   vehicle: VehicleState) -> float:
+        """计算分配评分"""
+        scores = {}
         
-        if task.task_type == 'to_unloading' and load_ratio < 0.5:
-            return 0.5  # 空车去卸载点不合适
-        elif task.task_type == 'to_loading' and load_ratio > 0.5:
-            return 0.5  # 满载车去装载点不合适
+        # 1. 距离评分
+        distance = self._calculate_distance(vehicle.position, task.start)
+        scores['distance'] = 1000 / (distance + 10)
+        
+        # 2. 车辆利用率评分（低利用率优先）
+        scores['vehicle_utilization'] = 1.0 - vehicle.utilization_rate
+        
+        # 3. 接口效率评分
+        scores['interface_efficiency'] = vehicle.interface_efficiency
+        
+        # 4. 负载兼容性评分
+        scores['load_compatibility'] = self._calculate_load_compatibility(task, vehicle)
+        
+        # 5. 历史性能评分
+        scores['historical_performance'] = self._get_historical_performance_score(
+            vehicle.vehicle_id, task.task_type
+        )
+        
+        # 6. 截止时间紧迫性评分
+        scores['deadline_urgency'] = self._calculate_deadline_urgency(task, vehicle)
+        
+        # 加权总分
+        total_score = sum(
+            scores[metric] * self.assignment_weights[metric]
+            for metric in scores
+        )
+        
+        # 空闲车辆加分
+        if vehicle.status == VehicleStatus.IDLE:
+            total_score *= 1.3
+        
+        # 任务队列长度惩罚
+        queue_penalty = len(vehicle.task_queue) * 0.1
+        total_score *= (1.0 - queue_penalty)
+        
+        return total_score
+    
+    def _calculate_load_compatibility(self, task: EnhancedVehicleTask, 
+                                    vehicle: VehicleState) -> float:
+        """计算负载兼容性"""
+        load_ratio = vehicle.current_load / vehicle.max_load
+        
+        if task.task_type == 'to_loading':
+            # 去装载：空车更合适
+            return 1.0 - load_ratio
+        elif task.task_type == 'to_unloading':
+            # 去卸载：满载更合适
+            return load_ratio
         else:
-            return 1.0
+            # 其他任务：中等负载
+            return 1.0 - abs(load_ratio - 0.5) * 2
     
-    def _calculate_preference_factor(self, task, status):
-        """计算点位偏好匹配因子"""
-        factor = 1.0
+    def _get_historical_performance_score(self, vehicle_id: str, task_type: str) -> float:
+        """获取历史性能评分"""
+        key = f"{vehicle_id}_{task_type}"
+        history = self.performance_memory.get(key, [])
         
-        if (task.task_type == 'to_loading' and 
-            status['preferred_loading_point'] is not None and
-            task.loading_point_id == status['preferred_loading_point']):
-            factor = 1.3
+        if not history:
+            return 0.5  # 默认中等评分
         
-        if (task.task_type == 'to_unloading' and 
-            status['preferred_unloading_point'] is not None and
-            task.unloading_point_id == status['preferred_unloading_point']):
-            factor = 1.3
+        # 计算最近的平均性能
+        recent_performances = history[-10:]  # 最近10次
+        avg_performance = sum(recent_performances) / len(recent_performances)
         
-        return factor
+        return min(1.0, max(0.0, avg_performance))
     
-    def _plan_coordinated_paths(self, vehicle_ids):
-        """为多个车辆规划协调的无冲突路径 - 简化版"""
-        if not self.traffic_manager or not vehicle_ids:
+    def _calculate_deadline_urgency(self, task: EnhancedVehicleTask, 
+                                   vehicle: VehicleState) -> float:
+        """计算截止时间紧迫性"""
+        if not task.deadline:
+            return 0.5  # 无截止时间
+        
+        current_time = time.time()
+        time_remaining = task.deadline - current_time
+        
+        if time_remaining <= 0:
+            return 1.0  # 已过期，最高紧迫性
+        
+        # 估算完成时间
+        estimated_completion_time = self._estimate_task_completion_time(task, vehicle)
+        
+        if estimated_completion_time > time_remaining:
+            return 0.8  # 可能无法按时完成
+        else:
+            urgency = 1.0 - (time_remaining - estimated_completion_time) / time_remaining
+            return max(0.0, min(1.0, urgency))
+    
+    def _estimate_task_completion_time(self, task: EnhancedVehicleTask, 
+                                      vehicle: VehicleState) -> float:
+        """估算任务完成时间"""
+        # 简化估算：距离 / 速度 + 操作时间
+        distance = self._calculate_distance(vehicle.position, task.start)
+        travel_time = distance / vehicle.speed
+        
+        # 添加任务类型相关的操作时间
+        operation_time = {
+            'to_loading': 60,  # 装载时间
+            'to_unloading': 40,  # 卸载时间
+            'to_initial': 0    # 返回起点
+        }.get(task.task_type, 30)
+        
+        return travel_time + operation_time
+    
+    def _record_assignment_decision(self, task: EnhancedVehicleTask, 
+                                   vehicle_id: str, score: float):
+        """记录分配决策用于学习"""
+        decision_record = {
+            'timestamp': time.time(),
+            'task_type': task.task_type,
+            'vehicle_id': vehicle_id,
+            'score': score,
+            'task_id': task.task_id
+        }
+        
+        # 这里可以添加机器学习逻辑来优化分配策略
+    
+    def update_performance_feedback(self, vehicle_id: str, task_type: str, 
+                                   performance_score: float):
+        """更新性能反馈"""
+        key = f"{vehicle_id}_{task_type}"
+        self.performance_memory[key].append(performance_score)
+        
+        # 限制历史长度
+        if len(self.performance_memory[key]) > 50:
+            self.performance_memory[key] = self.performance_memory[key][-50:]
+    
+    def _calculate_distance(self, pos1: Tuple, pos2: Tuple) -> float:
+        """计算距离"""
+        return math.sqrt((pos1[0] - pos2[0])**2 + (pos1[1] - pos2[1])**2)
+
+class PredictiveScheduler:
+    """预测性调度器"""
+    
+    def __init__(self, env, backbone_network):
+        self.env = env
+        self.backbone_network = backbone_network
+        
+        # 预测参数
+        self.prediction_horizon = 300.0  # 5分钟预测窗口
+        self.update_interval = 30.0      # 30秒更新一次
+        
+        # 预测模型
+        self.demand_predictor = self._init_demand_predictor()
+        self.congestion_predictor = self._init_congestion_predictor()
+        
+        # 预测结果缓存
+        self.last_prediction_time = 0
+        self.cached_predictions = {}
+    
+    def _init_demand_predictor(self):
+        """初始化需求预测器"""
+        return {
+            'loading_demand': defaultdict(float),
+            'unloading_demand': defaultdict(float),
+            'historical_patterns': []
+        }
+    
+    def _init_congestion_predictor(self):
+        """初始化拥堵预测器"""
+        return {
+            'interface_congestion': defaultdict(float),
+            'backbone_congestion': defaultdict(float),
+            'congestion_history': []
+        }
+    
+    def predict_optimal_assignments(self, pending_tasks: List[EnhancedVehicleTask],
+                                   vehicle_states: Dict[str, VehicleState]) -> Dict[str, List[str]]:
+        """预测最优任务分配"""
+        current_time = time.time()
+        
+        # 更新预测
+        if current_time - self.last_prediction_time > self.update_interval:
+            self._update_predictions(current_time)
+            self.last_prediction_time = current_time
+        
+        # 基于预测进行分配
+        assignments = {}
+        
+        # 按优先级和预测价值排序任务
+        sorted_tasks = self._sort_tasks_by_predicted_value(pending_tasks, current_time)
+        
+        available_vehicles = {vid: state for vid, state in vehicle_states.items() 
+                            if state.status == VehicleStatus.IDLE or len(state.task_queue) < 3}
+        
+        for task in sorted_tasks:
+            best_vehicle = self._predict_best_vehicle_for_task(task, available_vehicles, current_time)
+            
+            if best_vehicle:
+                if best_vehicle not in assignments:
+                    assignments[best_vehicle] = []
+                assignments[best_vehicle].append(task.task_id)
+                
+                # 更新可用车辆状态
+                available_vehicles[best_vehicle].task_queue.append(task.task_id)
+        
+        return assignments
+    
+    def _update_predictions(self, current_time: float):
+        """更新预测模型"""
+        # 更新需求预测
+        self._update_demand_predictions(current_time)
+        
+        # 更新拥堵预测
+        self._update_congestion_predictions(current_time)
+    
+    def _update_demand_predictions(self, current_time: float):
+        """更新需求预测"""
+        # 基于历史模式预测未来需求
+        time_of_day = (current_time % 86400) / 3600  # 一天中的小时
+        
+        # 简化的周期性需求模型
+        for i, loading_point in enumerate(self.env.loading_points):
+            # 假设需求有周期性变化
+            base_demand = 1.0
+            time_factor = 1.0 + 0.3 * math.sin(2 * math.pi * time_of_day / 24)
+            
+            predicted_demand = base_demand * time_factor
+            self.demand_predictor['loading_demand'][i] = predicted_demand
+        
+        for i, unloading_point in enumerate(self.env.unloading_points):
+            base_demand = 1.0
+            time_factor = 1.0 + 0.3 * math.cos(2 * math.pi * time_of_day / 24)
+            
+            predicted_demand = base_demand * time_factor
+            self.demand_predictor['unloading_demand'][i] = predicted_demand
+    
+    def _update_congestion_predictions(self, current_time: float):
+        """更新拥堵预测"""
+        if not self.backbone_network:
+            return
+        
+        # 预测接口拥堵
+        for interface_id, interface in self.backbone_network.backbone_interfaces.items():
+            # 基于使用频率预测拥堵
+            usage_rate = interface.usage_count / max(1, current_time / 3600)  # 每小时使用次数
+            congestion_score = min(1.0, usage_rate / 10.0)  # 假设10次/小时为拥堵
+            
+            self.congestion_predictor['interface_congestion'][interface_id] = congestion_score
+    
+    def _sort_tasks_by_predicted_value(self, tasks: List[EnhancedVehicleTask], 
+                                      current_time: float) -> List[EnhancedVehicleTask]:
+        """按预测价值排序任务"""
+        def task_value(task):
+            # 基础优先级
+            base_value = task.priority
+            
+            # 截止时间紧迫性
+            urgency_value = 0
+            if task.deadline:
+                time_remaining = task.deadline - current_time
+                urgency_value = max(0, 10 - time_remaining / 60)  # 时间越短价值越高
+            
+            # 需求预测价值
+            demand_value = 0
+            if task.loading_point_id is not None:
+                demand_value += self.demand_predictor['loading_demand'].get(task.loading_point_id, 1.0)
+            if task.unloading_point_id is not None:
+                demand_value += self.demand_predictor['unloading_demand'].get(task.unloading_point_id, 1.0)
+            
+            return base_value + urgency_value + demand_value
+        
+        return sorted(tasks, key=task_value, reverse=True)
+    
+    def _predict_best_vehicle_for_task(self, task: EnhancedVehicleTask, 
+                                      available_vehicles: Dict[str, VehicleState], 
+                                      current_time: float) -> Optional[str]:
+        """预测任务的最佳车辆"""
+        best_vehicle = None
+        best_predicted_performance = -float('inf')
+        
+        for vehicle_id, vehicle_state in available_vehicles.items():
+            # 预测性能
+            predicted_performance = self._predict_task_performance(
+                task, vehicle_state, current_time
+            )
+            
+            if predicted_performance > best_predicted_performance:
+                best_predicted_performance = predicted_performance
+                best_vehicle = vehicle_id
+        
+        return best_vehicle
+    
+    def _predict_task_performance(self, task: EnhancedVehicleTask, 
+                                 vehicle: VehicleState, current_time: float) -> float:
+        """预测任务执行性能"""
+        # 基础距离评分
+        distance = math.sqrt(
+            (vehicle.position[0] - task.start[0])**2 + 
+            (vehicle.position[1] - task.start[1])**2
+        )
+        distance_score = 100 / (distance + 10)
+        
+        # 车辆历史性能
+        historical_score = vehicle.interface_efficiency * 100
+        
+        # 预测拥堵影响
+        congestion_penalty = 0
+        if task.goal and self.backbone_network:
+            target_type, target_id = self.backbone_network.identify_target_point(task.goal)
+            if target_type:
+                # 查找相关接口的拥堵情况
+                relevant_interfaces = [
+                    interface_id for interface_id, interface in self.backbone_network.backbone_interfaces.items()
+                    if interface.backbone_path_id and target_type in interface.backbone_path_id
+                ]
+                
+                if relevant_interfaces:
+                    avg_congestion = sum(
+                        self.congestion_predictor['interface_congestion'].get(iid, 0)
+                        for iid in relevant_interfaces
+                    ) / len(relevant_interfaces)
+                    
+                    congestion_penalty = avg_congestion * 20
+        
+        return distance_score + historical_score - congestion_penalty
+
+class OptimizedVehicleScheduler:
+    """优化的车辆调度器 - 全面集成新系统"""
+    
+    def __init__(self, env, path_planner=None, traffic_manager=None, backbone_network=None):
+        self.env = env
+        self.path_planner = path_planner
+        self.traffic_manager = traffic_manager
+        self.backbone_network = backbone_network
+        
+        # 核心组件
+        self.task_assigner = IntelligentTaskAssigner(env, backbone_network)
+        self.predictive_scheduler = PredictiveScheduler(env, backbone_network)
+        
+        # 数据存储
+        self.tasks = {}  # {task_id: EnhancedVehicleTask}
+        self.vehicle_states = {}  # {vehicle_id: VehicleState}
+        self.mission_templates = {}  # {template_id: mission_config}
+        
+        # 任务管理
+        self.task_counter = 0
+        self.active_assignments = {}  # {vehicle_id: [task_ids]}
+        self.pending_tasks = deque()
+        
+        # 性能优化
+        self.batch_planning = True
+        self.max_batch_size = 8
+        self.parallel_processing = True
+        self.max_workers = 4
+        
+        # 调度策略
+        self.scheduling_strategy = 'predictive'  # 'greedy', 'optimal', 'predictive'
+        self.replan_interval = 60.0  # 重新规划间隔
+        self.last_global_replan = 0
+        
+        # 统计信息
+        self.stats = {
+            'total_tasks': 0,
+            'completed_tasks': 0,
+            'failed_tasks': 0,
+            'average_completion_time': 0,
+            'total_distance': 0,
+            'backbone_utilization_rate': 0,
+            'interface_efficiency': 0,
+            'vehicle_utilization': {},
+            'performance_trends': defaultdict(list),
+            'optimization_calls': 0,
+            'batch_planning_savings': 0
+        }
+        
+        # 线程安全
+        self.lock = threading.Lock()
+        
+        print("初始化优化版车辆调度器")
+    
+    def initialize_vehicles(self):
+        """初始化车辆状态"""
+        for vehicle_id, vehicle_data in self.env.vehicles.items():
+            position = vehicle_data.get('position', (0, 0, 0))
+            max_load = vehicle_data.get('max_load', 100)
+            
+            self.vehicle_states[vehicle_id] = VehicleState(
+                vehicle_id=vehicle_id,
+                position=position,
+                max_load=max_load,
+                current_load=vehicle_data.get('load', 0)
+            )
+            
+            self.active_assignments[vehicle_id] = []
+        
+        print(f"初始化了 {len(self.vehicle_states)} 个车辆状态")
+    
+    def create_enhanced_mission_template(self, template_id: str, 
+                                       loading_point_id: int = None, 
+                                       unloading_point_id: int = None,
+                                       mission_config: Dict = None) -> bool:
+        """创建增强的任务模板"""
+        if not self.env.loading_points or not self.env.unloading_points:
             return False
         
-        # 收集车辆路径需求
-        paths = {}
-        vehicle_tasks = {}
+        # 智能选择装载点和卸载点
+        if loading_point_id is None:
+            loading_point_id = self._select_optimal_loading_point()
         
-        for vehicle_id in vehicle_ids:
-            task_id = self.vehicle_statuses[vehicle_id]['current_task']
-            if not task_id or task_id not in self.tasks:
-                continue
+        if unloading_point_id is None:
+            unloading_point_id = self._select_optimal_unloading_point()
+        
+        # 验证点位有效性
+        if (loading_point_id >= len(self.env.loading_points) or 
+            unloading_point_id >= len(self.env.unloading_points)):
+            return False
+        
+        loading_point = self.env.loading_points[loading_point_id]
+        unloading_point = self.env.unloading_points[unloading_point_id]
+        
+        # 创建任务模板
+        template = {
+            'loading_point_id': loading_point_id,
+            'unloading_point_id': unloading_point_id,
+            'loading_position': loading_point,
+            'unloading_position': unloading_point,
+            'config': mission_config or {},
+            'tasks': [
+                {
+                    'task_type': 'to_loading',
+                    'goal': loading_point,
+                    'priority': 2,
+                    'estimated_duration': 180  # 3分钟
+                },
+                {
+                    'task_type': 'to_unloading',
+                    'goal': unloading_point,
+                    'priority': 3,
+                    'estimated_duration': 150  # 2.5分钟
+                },
+                {
+                    'task_type': 'to_initial',
+                    'goal': None,  # 将在分配时确定
+                    'priority': 1,
+                    'estimated_duration': 120  # 2分钟
+                }
+            ]
+        }
+        
+        self.mission_templates[template_id] = template
+        return True
+    
+    def assign_mission_intelligently(self, vehicle_id: str, template_id: str = None) -> bool:
+        """智能分配任务"""
+        if vehicle_id not in self.vehicle_states:
+            return False
+        
+        # 自动选择最佳模板
+        if template_id is None:
+            template_id = self._select_best_template_for_vehicle(vehicle_id)
+        
+        if template_id not in self.mission_templates:
+            return False
+        
+        template = self.mission_templates[template_id]
+        vehicle_state = self.vehicle_states[vehicle_id]
+        
+        # 生成任务
+        created_tasks = []
+        current_position = vehicle_state.position
+        
+        for task_template in template['tasks']:
+            task_id = f"task_{self.task_counter}"
+            self.task_counter += 1
             
-            task = self.tasks[task_id]
-            vehicle_tasks[vehicle_id] = task
+            # 确定目标位置
+            if task_template['goal'] is None:
+                # 返回初始位置
+                goal = self.env.vehicles[vehicle_id].get('initial_position', current_position)
+            else:
+                goal = task_template['goal']
             
-            # 规划初始路径
-            path_result = self._plan_vehicle_path(vehicle_id, task.start, task.goal)
+            # 创建增强任务
+            task = EnhancedVehicleTask(
+                task_id=task_id,
+                task_type=task_template['task_type'],
+                start=current_position,
+                goal=goal,
+                priority=task_template['priority'],
+                loading_point_id=template.get('loading_point_id'),
+                unloading_point_id=template.get('unloading_point_id'),
+                estimated_duration=task_template['estimated_duration']
+            )
             
-            if path_result:
-                if isinstance(path_result, tuple):
-                    path, structure = path_result
-                    paths[vehicle_id] = path
+            # 设置截止时间
+            if 'deadline_offset' in task_template:
+                task.deadline = time.time() + task_template['deadline_offset']
+            
+            self.tasks[task_id] = task
+            created_tasks.append(task_id)
+            
+            # 更新下一任务的起点
+            current_position = goal
+        
+        # 分配任务到车辆
+        self.active_assignments[vehicle_id].extend(created_tasks)
+        
+        # 如果车辆空闲，立即开始第一个任务
+        if vehicle_state.status == VehicleStatus.IDLE:
+            self._start_next_task(vehicle_id)
+        
+        self.stats['total_tasks'] += len(created_tasks)
+        
+        print(f"为车辆 {vehicle_id} 智能分配了 {len(created_tasks)} 个任务")
+        return True
+    
+    def _select_optimal_loading_point(self) -> int:
+        """选择最优装载点"""
+        if not self.env.loading_points:
+            return 0
+        
+        # 基于当前使用情况和预测需求选择
+        best_point = 0
+        best_score = -1
+        
+        for i, point in enumerate(self.env.loading_points):
+            # 计算当前使用率
+            current_usage = sum(
+                1 for task in self.tasks.values()
+                if task.loading_point_id == i and task.status in [TaskStatus.ASSIGNED, TaskStatus.IN_PROGRESS]
+            )
+            
+            # 获取预测需求
+            predicted_demand = self.predictive_scheduler.demand_predictor['loading_demand'].get(i, 1.0)
+            
+            # 计算评分（需求高但使用率低的点评分高）
+            usage_factor = 1.0 / (current_usage + 1)
+            demand_factor = predicted_demand
+            
+            score = usage_factor * demand_factor
+            
+            if score > best_score:
+                best_score = score
+                best_point = i
+        
+        return best_point
+    
+    def _select_optimal_unloading_point(self) -> int:
+        """选择最优卸载点"""
+        if not self.env.unloading_points:
+            return 0
+        
+        # 类似装载点的选择逻辑
+        best_point = 0
+        best_score = -1
+        
+        for i, point in enumerate(self.env.unloading_points):
+            current_usage = sum(
+                1 for task in self.tasks.values()
+                if task.unloading_point_id == i and task.status in [TaskStatus.ASSIGNED, TaskStatus.IN_PROGRESS]
+            )
+            
+            predicted_demand = self.predictive_scheduler.demand_predictor['unloading_demand'].get(i, 1.0)
+            
+            usage_factor = 1.0 / (current_usage + 1)
+            demand_factor = predicted_demand
+            
+            score = usage_factor * demand_factor
+            
+            if score > best_score:
+                best_score = score
+                best_point = i
+        
+        return best_point
+    
+    def _select_best_template_for_vehicle(self, vehicle_id: str) -> str:
+        """为车辆选择最佳模板"""
+        if not self.mission_templates:
+            # 创建默认模板
+            self.create_enhanced_mission_template("default")
+        
+        if len(self.mission_templates) == 1:
+            return list(self.mission_templates.keys())[0]
+        
+        # 基于车辆历史性能和当前状态选择模板
+        vehicle_state = self.vehicle_states[vehicle_id]
+        best_template = None
+        best_score = -1
+        
+        for template_id, template in self.mission_templates.items():
+            score = self._evaluate_template_for_vehicle(template, vehicle_state)
+            
+            if score > best_score:
+                best_score = score
+                best_template = template_id
+        
+        return best_template or list(self.mission_templates.keys())[0]
+    
+    def _evaluate_template_for_vehicle(self, template: Dict, vehicle: VehicleState) -> float:
+        """评估模板对车辆的适合度"""
+        score = 1.0
+        
+        # 基于车辆偏好
+        loading_id = template['loading_point_id']
+        unloading_id = template['unloading_point_id']
+        
+        if loading_id in vehicle.preferred_loading_points:
+            score += 0.3
+        
+        if unloading_id in vehicle.preferred_unloading_points:
+            score += 0.3
+        
+        # 基于距离
+        loading_pos = template['loading_position']
+        distance = math.sqrt(
+            (vehicle.position[0] - loading_pos[0])**2 + 
+            (vehicle.position[1] - loading_pos[1])**2
+        )
+        
+        distance_score = 100 / (distance + 10)
+        score += distance_score * 0.001  # 归一化距离影响
+        
+        return score
+    
+    def _start_next_task(self, vehicle_id: str) -> bool:
+        """开始车辆的下一个任务"""
+        if vehicle_id not in self.active_assignments:
+            return False
+        
+        assignments = self.active_assignments[vehicle_id]
+        if not assignments:
+            return False
+        
+        task_id = assignments[0]
+        if task_id not in self.tasks:
+            # 移除无效任务
+            assignments.remove(task_id)
+            return self._start_next_task(vehicle_id)
+        
+        task = self.tasks[task_id]
+        vehicle_state = self.vehicle_states[vehicle_id]
+        
+        # 更新任务状态
+        task.status = TaskStatus.IN_PROGRESS
+        task.assigned_vehicle = vehicle_id
+        task.start_time = time.time()
+        
+        # 更新车辆状态
+        vehicle_state.status = VehicleStatus.MOVING
+        vehicle_state.current_task = task_id
+        
+        # 同步到环境
+        if vehicle_id in self.env.vehicles:
+            self.env.vehicles[vehicle_id]['status'] = 'moving'
+        
+        # 规划路径
+        success = self._plan_task_path(task, vehicle_state)
+        
+        if success:
+            print(f"车辆 {vehicle_id} 开始任务 {task_id} ({task.task_type})")
+            return True
+        else:
+            # 路径规划失败，标记任务失败
+            task.status = TaskStatus.FAILED
+            vehicle_state.status = VehicleStatus.IDLE
+            self.stats['failed_tasks'] += 1
+            
+            # 移除失败的任务并尝试下一个
+            assignments.remove(task_id)
+            return self._start_next_task(vehicle_id)
+    
+    def _plan_task_path(self, task: EnhancedVehicleTask, vehicle: VehicleState) -> bool:
+        """为任务规划路径"""
+        if not self.path_planner:
+            return False
+        
+        planning_start = time.time()
+        
+        try:
+            # 使用增强的路径规划接口
+            result = self.path_planner.plan_path(
+                vehicle.vehicle_id, 
+                task.start, 
+                task.goal,
+                use_backbone=True,
+                check_conflicts=True
+            )
+            
+            if result:
+                if isinstance(result, tuple) and len(result) == 2:
+                    path, structure = result
+                    task.path = path
+                    task.path_structure = structure
+                    task.quality_score = structure.get('final_quality', 0.5)
+                    
+                    # 处理接口预约
+                    if structure.get('interface_id'):
+                        interface_id = structure['interface_id']
+                        access_time = time.time() + structure.get('access_length', 0) * 2
+                        task.reserve_interface(interface_id, access_time)
+                        
+                        # 注册到交通管理器
+                        if self.traffic_manager:
+                            self.traffic_manager.register_vehicle_path_enhanced(
+                                vehicle.vehicle_id, path, structure, task.start_time
+                            )
+                    
+                    # 更新车辆路径信息
+                    if vehicle.vehicle_id in self.env.vehicles:
+                        env_vehicle = self.env.vehicles[vehicle.vehicle_id]
+                        env_vehicle['path'] = path
+                        env_vehicle['path_index'] = 0
+                        env_vehicle['progress'] = 0.0
+                        env_vehicle['path_structure'] = structure
+                    
+                    # 更新统计
+                    if structure.get('type') in ['interface_assisted', 'backbone_only']:
+                        vehicle.backbone_usage_count += 1
+                    else:
+                        vehicle.direct_path_count += 1
                 else:
-                    paths[vehicle_id] = path_result
-        
-        # 使用交通管理器解决冲突
-        if len(paths) > 1:
-            conflict_free_paths = self.traffic_manager.resolve_conflicts(paths)
-            
-            if conflict_free_paths:
-                # 更新任务和车辆的路径
-                for vehicle_id, path in conflict_free_paths.items():
-                    if vehicle_id in vehicle_tasks:
-                        task = vehicle_tasks[vehicle_id]
-                        task.path = path
-                        task.update_path_structure({'type': 'conflict_resolved'})
-                        
-                        # 注册路径到交通管理器
-                        self.traffic_manager.register_vehicle_path(
-                            vehicle_id, path,
-                            self.env.current_time if hasattr(self.env, 'current_time') else 0
-                        )
-                        
-                        # 更新车辆路径
-                        if vehicle_id in self.env.vehicles:
-                            self.env.vehicles[vehicle_id]['path'] = path
-                            self.env.vehicles[vehicle_id]['path_index'] = 0
-                            self.env.vehicles[vehicle_id]['progress'] = 0.0
+                    task.path = result
+                    task.path_structure = {'type': 'direct'}
+                    vehicle.direct_path_count += 1
                 
+                task.planning_time = time.time() - planning_start
                 return True
+        
+        except Exception as e:
+            print(f"任务 {task.task_id} 路径规划失败: {e}")
         
         return False
     
-    def update(self, time_delta):
-        """更新所有车辆状态，包括ECBS冲突检测和解决"""
-        # 首先更新车辆状态
-        super().update(time_delta)
+    def update(self, time_delta: float):
+        """更新调度器状态"""
+        current_time = time.time()
         
-        # 检查和解决执行中的冲突
-        if self.traffic_manager:
-            self._check_and_resolve_execution_conflicts()
+        # 更新所有车辆状态
+        for vehicle_id, vehicle_state in self.vehicle_states.items():
+            self._update_vehicle_state(vehicle_id, vehicle_state, time_delta)
         
-        return True
+        # 处理待分配任务
+        self._process_pending_tasks()
+        
+        # 批量路径规划优化
+        if self.batch_planning:
+            self._optimize_batch_planning()
+        
+        # 全局重新规划
+        if current_time - self.last_global_replan > self.replan_interval:
+            self._global_replan()
+            self.last_global_replan = current_time
+        
+        # 更新性能统计
+        self._update_performance_stats(time_delta)
     
-    def _check_and_resolve_execution_conflicts(self):
-        """检查并解决执行中的路径冲突 - 简化版"""
-        # 收集当前活动的车辆和路径
-        active_vehicles = []
-        active_paths = {}
+    def _update_vehicle_state(self, vehicle_id: str, vehicle_state: VehicleState, 
+                             time_delta: float):
+        """更新单个车辆状态"""
+        # 更新利用率
+        vehicle_state.update_utilization(time_delta)
         
-        for vehicle_id, status in self.vehicle_statuses.items():
-            if status['status'] == 'moving' and status['current_task']:
-                active_vehicles.append(vehicle_id)
-                
-                task_id = status['current_task']
-                if task_id in self.tasks and self.tasks[task_id].path:
-                    # 获取剩余路径
-                    if vehicle_id in self.env.vehicles:
-                        vehicle = self.env.vehicles[vehicle_id]
-                        path_index = vehicle.get('path_index', 0)
-                        path = self.tasks[task_id].path[path_index:]
-                        
-                        if len(path) > 1:  # 确保有足够的路径进行冲突检测
-                            active_paths[vehicle_id] = path
-        
-        # 如果有多个活动车辆，检查冲突
-        if len(active_vehicles) > 1 and len(active_paths) > 1:
-            conflicts = self.traffic_manager.detect_conflicts(active_paths)
+        # 同步环境中的车辆信息
+        if vehicle_id in self.env.vehicles:
+            env_vehicle = self.env.vehicles[vehicle_id]
+            vehicle_state.position = env_vehicle.get('position', vehicle_state.position)
+            vehicle_state.current_load = env_vehicle.get('load', vehicle_state.current_load)
             
-            if conflicts:
-                # 记录冲突车辆
-                for conflict in conflicts:
-                    if hasattr(conflict, 'agent1') and hasattr(conflict, 'agent2'):
-                        self.conflict_counts[conflict.agent1] = \
-                            self.conflict_counts.get(conflict.agent1, 0) + 1
-                        self.conflict_counts[conflict.agent2] = \
-                            self.conflict_counts.get(conflict.agent2, 0) + 1
-                
-                # 统计冲突解决次数
-                self.stats['conflict_resolution_count'] += len(conflicts)
-                
-                # 使用ECBS解决冲突
-                if self.conflict_resolution_strategy == 'ecbs':
-                    new_paths = self.traffic_manager.resolve_conflicts(active_paths)
-                    
-                    if new_paths:
-                        self._apply_conflict_resolution(new_paths, active_vehicles)
-    
-    def _apply_conflict_resolution(self, new_paths, active_vehicles):
-        """应用冲突解决结果"""
-        for vehicle_id, path in new_paths.items():
-            if vehicle_id in active_vehicles:
-                task_id = self.vehicle_statuses[vehicle_id]['current_task']
-                if task_id in self.tasks:
-                    # 更新任务路径
-                    self.tasks[task_id].path = path
-                    self.tasks[task_id].update_path_structure({'type': 'conflict_resolved'})
-                    
-                    # 更新车辆路径
-                    self.env.vehicles[vehicle_id]['path'] = path
-                    self.env.vehicles[vehicle_id]['path_index'] = 0
-                    self.env.vehicles[vehicle_id]['progress'] = 0.0
-                    
-                    # 重新注册路径
-                    self.traffic_manager.release_vehicle_path(vehicle_id)
-                    self.traffic_manager.register_vehicle_path(
-                        vehicle_id, path,
-                        self.env.current_time if hasattr(self.env, 'current_time') else 0
-                    )
-    
-    def get_vehicle_info(self, vehicle_id):
-        """获取车辆详细信息，包括ECBS特有信息"""
-        info = super().get_vehicle_info(vehicle_id)
+            # 更新状态
+            env_status = env_vehicle.get('status', 'idle')
+            status_mapping = {
+                'idle': VehicleStatus.IDLE,
+                'moving': VehicleStatus.MOVING,
+                'loading': VehicleStatus.LOADING,
+                'unloading': VehicleStatus.UNLOADING
+            }
+            vehicle_state.status = status_mapping.get(env_status, VehicleStatus.IDLE)
         
-        if not info:
+        # 处理当前任务进度
+        if vehicle_state.current_task:
+            self._update_task_progress(vehicle_state.current_task, vehicle_state, time_delta)
+    
+    def _update_task_progress(self, task_id: str, vehicle_state: VehicleState, 
+                             time_delta: float):
+        """更新任务进度"""
+        if task_id not in self.tasks:
+            return
+        
+        task = self.tasks[task_id]
+        
+        # 根据车辆状态更新任务进度
+        if vehicle_state.status == VehicleStatus.MOVING and task.path:
+            # 基于路径进度更新
+            if vehicle_state.vehicle_id in self.env.vehicles:
+                env_vehicle = self.env.vehicles[vehicle_state.vehicle_id]
+                path_index = env_vehicle.get('path_index', 0)
+                path_length = len(task.path)
+                
+                if path_length > 0:
+                    progress = path_index / path_length
+                    task.update_progress(progress)
+                    
+                    # 检查是否到达目标
+                    if progress >= 1.0:
+                        self._handle_task_arrival(task, vehicle_state)
+        
+        elif vehicle_state.status in [VehicleStatus.LOADING, VehicleStatus.UNLOADING]:
+            # 装载/卸载过程中的进度更新
+            operation_time = 60 if vehicle_state.status == VehicleStatus.LOADING else 40
+            elapsed_time = time.time() - task.start_time
+            
+            progress = min(1.0, elapsed_time / operation_time)
+            task.update_progress(progress)
+            
+            if progress >= 1.0:
+                self._complete_current_task(vehicle_state.vehicle_id)
+    
+    def _handle_task_arrival(self, task: EnhancedVehicleTask, vehicle_state: VehicleState):
+        """处理任务到达目标"""
+        if task.task_type == 'to_loading':
+            # 到达装载点，开始装载
+            vehicle_state.status = VehicleStatus.LOADING
+            if vehicle_state.vehicle_id in self.env.vehicles:
+                self.env.vehicles[vehicle_state.vehicle_id]['status'] = 'loading'
+                self.env.vehicles[vehicle_state.vehicle_id]['loading_progress'] = 0
+            
+            # 更新偏好
+            if (task.loading_point_id is not None and 
+                task.loading_point_id not in vehicle_state.preferred_loading_points):
+                vehicle_state.preferred_loading_points.append(task.loading_point_id)
+        
+        elif task.task_type == 'to_unloading':
+            # 到达卸载点，开始卸载
+            vehicle_state.status = VehicleStatus.UNLOADING
+            if vehicle_state.vehicle_id in self.env.vehicles:
+                self.env.vehicles[vehicle_state.vehicle_id]['status'] = 'unloading'
+                self.env.vehicles[vehicle_state.vehicle_id]['unloading_progress'] = 0
+            
+            # 更新偏好
+            if (task.unloading_point_id is not None and 
+                task.unloading_point_id not in vehicle_state.preferred_unloading_points):
+                vehicle_state.preferred_unloading_points.append(task.unloading_point_id)
+        
+        elif task.task_type == 'to_initial':
+            # 返回起点，完成一个循环
+            self._complete_current_task(vehicle_state.vehicle_id)
+            
+            # 更新完成循环数
+            if vehicle_state.vehicle_id in self.env.vehicles:
+                env_vehicle = self.env.vehicles[vehicle_state.vehicle_id]
+                env_vehicle['completed_cycles'] = env_vehicle.get('completed_cycles', 0) + 1
+            
+            # 自动分配下一轮任务
+            self._schedule_next_mission_cycle(vehicle_state.vehicle_id)
+    
+    def _complete_current_task(self, vehicle_id: str):
+        """完成当前任务"""
+        if vehicle_id not in self.vehicle_states:
+            return
+        
+        vehicle_state = self.vehicle_states[vehicle_id]
+        
+        if not vehicle_state.current_task:
+            return
+        
+        task_id = vehicle_state.current_task
+        if task_id not in self.tasks:
+            return
+        
+        task = self.tasks[task_id]
+        
+        # 完成任务
+        task.status = TaskStatus.COMPLETED
+        task.completion_time = time.time()
+        task.actual_duration = task.completion_time - task.start_time
+        
+        # 释放接口预约
+        for interface_id in task.reserved_interfaces:
+            if self.traffic_manager:
+                self.traffic_manager.interface_manager.release_interface(interface_id, vehicle_id)
+        
+        # 记录性能
+        metrics = task.get_performance_metrics()
+        vehicle_state.add_performance_record(metrics)
+        
+        # 更新车辆效率
+        if task.path_structure.get('type') in ['interface_assisted', 'backbone_only']:
+            # 更新接口使用效率
+            efficiency_update = task.quality_score * 0.1
+            vehicle_state.interface_efficiency = (
+                vehicle_state.interface_efficiency * 0.9 + efficiency_update
+            )
+        
+        # 从分配列表中移除
+        if vehicle_id in self.active_assignments:
+            if task_id in self.active_assignments[vehicle_id]:
+                self.active_assignments[vehicle_id].remove(task_id)
+        
+        # 更新统计
+        self.stats['completed_tasks'] += 1
+        
+        if task.path:
+            path_distance = sum(
+                math.sqrt((task.path[i+1][0] - task.path[i][0])**2 + 
+                         (task.path[i+1][1] - task.path[i][1])**2)
+                for i in range(len(task.path) - 1)
+            )
+            self.stats['total_distance'] += path_distance
+            vehicle_state.total_distance += path_distance
+        
+        # 释放交通管理器中的路径
+        if self.traffic_manager:
+            self.traffic_manager.release_vehicle_path(vehicle_id)
+        
+        # 更新任务分配器的性能反馈
+        performance_score = min(1.0, task.quality_score + (1.0 if metrics['deadline_met'] else -0.5))
+        self.task_assigner.update_performance_feedback(
+            vehicle_id, task.task_type, performance_score
+        )
+        
+        # 清理车辆状态
+        vehicle_state.current_task = None
+        vehicle_state.status = VehicleStatus.IDLE
+        vehicle_state.completed_tasks += 1
+        
+        if vehicle_id in self.env.vehicles:
+            self.env.vehicles[vehicle_id]['status'] = 'idle'
+        
+        print(f"任务 {task_id} 完成，车辆 {vehicle_id}，"
+              f"用时 {task.actual_duration:.1f}s，质量 {task.quality_score:.2f}")
+        
+        # 开始下一个任务
+        self._start_next_task(vehicle_id)
+    
+    def _schedule_next_mission_cycle(self, vehicle_id: str):
+        """安排下一轮任务循环"""
+        # 如果车辆没有更多任务，自动分配新的任务循环
+        if (vehicle_id in self.active_assignments and 
+            not self.active_assignments[vehicle_id]):
+            
+            # 智能选择最佳模板
+            self.assign_mission_intelligently(vehicle_id)
+    
+    def _process_pending_tasks(self):
+        """处理待分配任务"""
+        if not self.pending_tasks:
+            return
+        
+        # 使用预测性调度
+        if self.scheduling_strategy == 'predictive':
+            assignments = self.predictive_scheduler.predict_optimal_assignments(
+                list(self.pending_tasks), self.vehicle_states
+            )
+            
+            for vehicle_id, task_ids in assignments.items():
+                for task_id in task_ids:
+                    if vehicle_id in self.active_assignments:
+                        self.active_assignments[vehicle_id].append(task_id)
+                        
+                        # 从待处理队列中移除
+                        task_to_remove = None
+                        for task in self.pending_tasks:
+                            if task.task_id == task_id:
+                                task_to_remove = task
+                                break
+                        
+                        if task_to_remove:
+                            self.pending_tasks.remove(task_to_remove)
+        
+        # 启动空闲车辆的任务
+        for vehicle_id, vehicle_state in self.vehicle_states.items():
+            if (vehicle_state.status == VehicleStatus.IDLE and 
+                vehicle_id in self.active_assignments and
+                self.active_assignments[vehicle_id] and
+                not vehicle_state.current_task):
+                
+                self._start_next_task(vehicle_id)
+    
+    def _optimize_batch_planning(self):
+        """批量规划优化"""
+        if not self.batch_planning or len(self.vehicle_states) < 2:
+            return
+        
+        # 收集需要重新规划的车辆
+        vehicles_to_replan = []
+        
+        for vehicle_id, vehicle_state in self.vehicle_states.items():
+            if (vehicle_state.status == VehicleStatus.MOVING and 
+                vehicle_state.current_task in self.tasks):
+                
+                task = self.tasks[vehicle_state.current_task]
+                
+                # 检查是否需要重新规划
+                if self._should_replan_vehicle(vehicle_id, task):
+                    vehicles_to_replan.append(vehicle_id)
+        
+        # 批量重新规划
+        if len(vehicles_to_replan) >= 2:
+            self._batch_replan_vehicles(vehicles_to_replan)
+            self.stats['batch_planning_savings'] += len(vehicles_to_replan) - 1
+    
+    def _should_replan_vehicle(self, vehicle_id: str, task: EnhancedVehicleTask) -> bool:
+        """判断是否需要重新规划车辆路径"""
+        # 检查路径质量
+        if task.quality_score < 0.6:
+            return True
+        
+        # 检查是否有新的冲突
+        if self.traffic_manager:
+            conflicts = self.traffic_manager.detect_all_conflicts()
+            
+            for conflict in conflicts:
+                if conflict.agent1 == vehicle_id or conflict.agent2 == vehicle_id:
+                    return True
+        
+        return False
+    
+    def _batch_replan_vehicles(self, vehicle_ids: List[str]):
+        """批量重新规划车辆路径"""
+        if not self.traffic_manager:
+            return
+        
+        print(f"批量重新规划 {len(vehicle_ids)} 个车辆的路径")
+        
+        # 收集当前路径
+        current_paths = {}
+        for vehicle_id in vehicle_ids:
+            if vehicle_id in self.env.vehicles and 'path' in self.env.vehicles[vehicle_id]:
+                current_paths[vehicle_id] = self.env.vehicles[vehicle_id]['path']
+        
+        if len(current_paths) < 2:
+            return
+        
+        # 检测冲突
+        conflicts = self.traffic_manager.detect_all_conflicts()
+        
+        if conflicts:
+            # 解决冲突
+            resolved_paths = self.traffic_manager.resolve_conflicts_enhanced(conflicts)
+            
+            # 应用新路径
+            for vehicle_id, new_path in resolved_paths.items():
+                if vehicle_id in vehicle_ids and new_path != current_paths.get(vehicle_id):
+                    self._apply_new_path(vehicle_id, new_path)
+    
+    def _apply_new_path(self, vehicle_id: str, new_path: List):
+        """应用新路径"""
+        if vehicle_id not in self.vehicle_states:
+            return
+        
+        vehicle_state = self.vehicle_states[vehicle_id]
+        
+        if vehicle_state.current_task in self.tasks:
+            task = self.tasks[vehicle_state.current_task]
+            task.path = new_path
+            task.path_structure = {'type': 'conflict_resolved', 'optimized': True}
+            
+            # 更新环境中的车辆路径
+            if vehicle_id in self.env.vehicles:
+                self.env.vehicles[vehicle_id]['path'] = new_path
+                self.env.vehicles[vehicle_id]['path_index'] = 0
+                self.env.vehicles[vehicle_id]['progress'] = 0.0
+                self.env.vehicles[vehicle_id]['path_structure'] = task.path_structure
+    
+    def _global_replan(self):
+        """全局重新规划"""
+        self.stats['optimization_calls'] += 1
+        
+        # 预测性重新调度
+        if self.scheduling_strategy == 'predictive':
+            # 更新预测模型
+            current_time = time.time()
+            self.predictive_scheduler._update_predictions(current_time)
+            
+            # 重新评估任务分配
+            pending_and_future_tasks = []
+            
+            # 收集所有未完成的任务
+            for task in self.tasks.values():
+                if task.status in [TaskStatus.PENDING, TaskStatus.ASSIGNED]:
+                    pending_and_future_tasks.append(task)
+            
+            if pending_and_future_tasks:
+                # 预测性重新分配
+                new_assignments = self.predictive_scheduler.predict_optimal_assignments(
+                    pending_and_future_tasks, self.vehicle_states
+                )
+                
+                # 应用新的分配
+                self._apply_new_assignments(new_assignments)
+    
+    def _apply_new_assignments(self, new_assignments: Dict[str, List[str]]):
+        """应用新的任务分配"""
+        for vehicle_id, task_ids in new_assignments.items():
+            if vehicle_id in self.active_assignments:
+                # 只添加新的任务，不移除已在执行的任务
+                current_assignments = set(self.active_assignments[vehicle_id])
+                new_task_ids = [tid for tid in task_ids if tid not in current_assignments]
+                
+                self.active_assignments[vehicle_id].extend(new_task_ids)
+    
+    def _update_performance_stats(self, time_delta: float):
+        """更新性能统计"""
+        # 更新车辆利用率统计
+        for vehicle_id, vehicle_state in self.vehicle_states.items():
+            self.stats['vehicle_utilization'][vehicle_id] = vehicle_state.utilization_rate
+        
+        # 计算平均完成时间
+        completed_tasks = [task for task in self.tasks.values() 
+                          if task.status == TaskStatus.COMPLETED]
+        
+        if completed_tasks:
+            total_duration = sum(task.actual_duration for task in completed_tasks)
+            self.stats['average_completion_time'] = total_duration / len(completed_tasks)
+        
+        # 计算骨干网络利用率
+        total_backbone_usage = sum(vehicle.backbone_usage_count 
+                                 for vehicle in self.vehicle_states.values())
+        total_path_usage = sum(vehicle.backbone_usage_count + vehicle.direct_path_count 
+                             for vehicle in self.vehicle_states.values())
+        
+        if total_path_usage > 0:
+            self.stats['backbone_utilization_rate'] = total_backbone_usage / total_path_usage
+        
+        # 计算接口效率
+        interface_efficiencies = [vehicle.interface_efficiency 
+                                for vehicle in self.vehicle_states.values()]
+        if interface_efficiencies:
+            self.stats['interface_efficiency'] = sum(interface_efficiencies) / len(interface_efficiencies)
+        
+        # 记录性能趋势
+        current_time = time.time()
+        self.stats['performance_trends']['completion_rate'].append({
+            'timestamp': current_time,
+            'value': self.stats['completed_tasks'] / max(1, self.stats['total_tasks'])
+        })
+        
+        self.stats['performance_trends']['utilization'].append({
+            'timestamp': current_time,
+            'value': sum(self.stats['vehicle_utilization'].values()) / max(1, len(self.stats['vehicle_utilization']))
+        })
+        
+        # 限制趋势数据长度
+        for trend_name, trend_data in self.stats['performance_trends'].items():
+            if len(trend_data) > 100:
+                self.stats['performance_trends'][trend_name] = trend_data[-100:]
+    
+    def get_comprehensive_stats(self) -> Dict:
+        """获取综合统计信息"""
+        stats = self.stats.copy()
+        
+        # 添加实时状态
+        stats['real_time'] = {
+            'active_vehicles': len([v for v in self.vehicle_states.values() 
+                                  if v.status != VehicleStatus.IDLE]),
+            'idle_vehicles': len([v for v in self.vehicle_states.values() 
+                                if v.status == VehicleStatus.IDLE]),
+            'active_tasks': len([t for t in self.tasks.values() 
+                               if t.status == TaskStatus.IN_PROGRESS]),
+            'pending_tasks': len([t for t in self.tasks.values() 
+                                if t.status == TaskStatus.PENDING]),
+            'current_time': time.time()
+        }
+        
+        # 添加车辆详细统计
+        stats['vehicle_details'] = {}
+        for vehicle_id, vehicle_state in self.vehicle_states.items():
+            stats['vehicle_details'][vehicle_id] = {
+                'status': vehicle_state.status.value,
+                'utilization_rate': vehicle_state.utilization_rate,
+                'completed_tasks': vehicle_state.completed_tasks,
+                'total_distance': vehicle_state.total_distance,
+                'backbone_usage_rate': (
+                    vehicle_state.backbone_usage_count / 
+                    max(1, vehicle_state.backbone_usage_count + vehicle_state.direct_path_count)
+                ),
+                'interface_efficiency': vehicle_state.interface_efficiency
+            }
+        
+        # 添加任务分类统计
+        task_status_counts = defaultdict(int)
+        task_type_counts = defaultdict(int)
+        
+        for task in self.tasks.values():
+            task_status_counts[task.status.value] += 1
+            task_type_counts[task.task_type] += 1
+        
+        stats['task_breakdown'] = {
+            'by_status': dict(task_status_counts),
+            'by_type': dict(task_type_counts)
+        }
+        
+        # 性能指标
+        if self.stats['total_tasks'] > 0:
+            stats['efficiency_metrics'] = {
+                'task_success_rate': self.stats['completed_tasks'] / self.stats['total_tasks'],
+                'task_failure_rate': self.stats['failed_tasks'] / self.stats['total_tasks'],
+                'average_task_quality': sum(
+                    task.quality_score for task in self.tasks.values() 
+                    if task.status == TaskStatus.COMPLETED
+                ) / max(1, self.stats['completed_tasks'])
+            }
+        
+        return stats
+    
+    def get_vehicle_info(self, vehicle_id: str) -> Optional[Dict]:
+        """获取车辆详细信息"""
+        if vehicle_id not in self.vehicle_states:
             return None
         
-        # 添加ECBS特有信息
-        info['priority'] = self.vehicle_priorities.get(vehicle_id, 1)
-        info['conflict_count'] = self.conflict_counts.get(vehicle_id, 0)
+        vehicle_state = self.vehicle_states[vehicle_id]
+        
+        # 基本信息
+        info = {
+            'vehicle_id': vehicle_id,
+            'status': vehicle_state.status.value,
+            'position': vehicle_state.position,
+            'current_load': vehicle_state.current_load,
+            'max_load': vehicle_state.max_load,
+            'utilization_rate': vehicle_state.utilization_rate,
+            'completed_tasks': vehicle_state.completed_tasks,
+            'total_distance': vehicle_state.total_distance
+        }
+        
+        # 当前任务信息
+        if vehicle_state.current_task and vehicle_state.current_task in self.tasks:
+            current_task = self.tasks[vehicle_state.current_task]
+            info['current_task'] = {
+                'task_id': current_task.task_id,
+                'task_type': current_task.task_type,
+                'progress': current_task.execution_progress,
+                'quality_score': current_task.quality_score,
+                'path_structure': current_task.path_structure,
+                'reserved_interfaces': current_task.reserved_interfaces
+            }
+        
+        # 任务队列信息
+        info['task_queue'] = []
+        if vehicle_id in self.active_assignments:
+            for task_id in self.active_assignments[vehicle_id]:
+                if task_id in self.tasks:
+                    task = self.tasks[task_id]
+                    info['task_queue'].append({
+                        'task_id': task_id,
+                        'task_type': task.task_type,
+                        'priority': task.priority,
+                        'status': task.status.value
+                    })
+        
+        # 性能历史
+        info['performance_history'] = vehicle_state.performance_history[-10:]  # 最近10条记录
+        
+        # 偏好和效率
+        info['preferences'] = {
+            'loading_points': vehicle_state.preferred_loading_points,
+            'unloading_points': vehicle_state.preferred_unloading_points
+        }
+        
+        info['efficiency_metrics'] = {
+            'backbone_usage_count': vehicle_state.backbone_usage_count,
+            'direct_path_count': vehicle_state.direct_path_count,
+            'backbone_usage_rate': (
+                vehicle_state.backbone_usage_count / 
+                max(1, vehicle_state.backbone_usage_count + vehicle_state.direct_path_count)
+            ),
+            'interface_efficiency': vehicle_state.interface_efficiency
+        }
         
         return info
+
+# ECBS增强版调度器
+class ECBSEnhancedVehicleScheduler(OptimizedVehicleScheduler):
+    """ECBS增强版车辆调度器"""
     
-    def get_stats(self):
-        """获取调度统计信息，包括ECBS特有信息"""
-        stats = super().get_stats()
+    def __init__(self, env, path_planner=None, traffic_manager=None, backbone_network=None):
+        super().__init__(env, path_planner, traffic_manager, backbone_network)
         
-        # 添加ECBS特有信息
-        stats['conflict_resolution'] = {
-            'strategy': self.conflict_resolution_strategy,
-            'total_conflicts': sum(self.conflict_counts.values()),
-            'conflicts_by_vehicle': self.conflict_counts.copy(),
-            'resolution_count': self.stats.get('conflict_resolution_count', 0)
+        # ECBS特有设置
+        self.conflict_detection_interval = 10.0  # 10秒检测一次冲突
+        self.last_conflict_check = 0
+        self.ecbs_enabled = True
+        
+        # 冲突统计
+        self.conflict_stats = {
+            'total_conflicts_detected': 0,
+            'conflicts_resolved': 0,
+            'ecbs_calls': 0,
+            'resolution_success_rate': 0.0
         }
+        
+        print("初始化ECBS增强版车辆调度器")
+    
+    def update(self, time_delta: float):
+        """更新调度器状态 - 增加ECBS冲突检测"""
+        # 调用父类更新
+        super().update(time_delta)
+        
+        # ECBS冲突检测和解决
+        current_time = time.time()
+        if current_time - self.last_conflict_check > self.conflict_detection_interval:
+            self._ecbs_conflict_resolution()
+            self.last_conflict_check = current_time
+    
+    def _ecbs_conflict_resolution(self):
+        """ECBS冲突检测和解决"""
+        if not self.traffic_manager or not self.ecbs_enabled:
+            return
+        
+        # 收集所有活动车辆的路径
+        active_paths = {}
+        for vehicle_id, vehicle_state in self.vehicle_states.items():
+            if (vehicle_state.status == VehicleStatus.MOVING and 
+                vehicle_state.current_task in self.tasks):
+                
+                task = self.tasks[vehicle_state.current_task]
+                if task.path:
+                    # 获取剩余路径
+                    if vehicle_id in self.env.vehicles:
+                        env_vehicle = self.env.vehicles[vehicle_id]
+                        path_index = env_vehicle.get('path_index', 0)
+                        remaining_path = task.path[path_index:]
+                        
+                        if len(remaining_path) > 1:
+                            active_paths[vehicle_id] = remaining_path
+        
+        if len(active_paths) < 2:
+            return
+        
+        # 检测冲突
+        conflicts = self.traffic_manager.detect_all_conflicts()
+        
+        if conflicts:
+            self.conflict_stats['total_conflicts_detected'] += len(conflicts)
+            self.conflict_stats['ecbs_calls'] += 1
+            
+            print(f"ECBS检测到 {len(conflicts)} 个冲突，开始解决...")
+            
+            # 解决冲突
+            resolved_paths = self.traffic_manager.resolve_conflicts_enhanced(conflicts)
+            
+            if resolved_paths:
+                # 应用解决方案
+                resolution_count = 0
+                for vehicle_id, new_path in resolved_paths.items():
+                    if vehicle_id in active_paths and new_path != active_paths[vehicle_id]:
+                        self._apply_new_path(vehicle_id, new_path)
+                        resolution_count += 1
+                
+                self.conflict_stats['conflicts_resolved'] += resolution_count
+                
+                if resolution_count > 0:
+                    print(f"ECBS成功解决了 {resolution_count} 个车辆的路径冲突")
+        
+        # 更新成功率
+        if self.conflict_stats['total_conflicts_detected'] > 0:
+            self.conflict_stats['resolution_success_rate'] = (
+                self.conflict_stats['conflicts_resolved'] / 
+                self.conflict_stats['total_conflicts_detected']
+            )
+    
+    def get_comprehensive_stats(self) -> Dict:
+        """获取包含ECBS统计的综合信息"""
+        stats = super().get_comprehensive_stats()
+        
+        # 添加ECBS统计
+        stats['ecbs_stats'] = self.conflict_stats.copy()
+        
+        # 添加交通管理器统计
+        if self.traffic_manager:
+            traffic_stats = self.traffic_manager.get_comprehensive_stats()
+            stats['traffic_management'] = traffic_stats
         
         return stats
 
-
-# 保持向后兼容性
-VehicleScheduler = SimplifiedVehicleScheduler
-ECBSVehicleScheduler = SimplifiedECBSVehicleScheduler
+# 向后兼容性
+VehicleScheduler = OptimizedVehicleScheduler
+SimplifiedVehicleScheduler = OptimizedVehicleScheduler
+SimplifiedECBSVehicleScheduler = ECBSEnhancedVehicleScheduler
