@@ -84,6 +84,58 @@ class VehicleInfo:
                 random.randint(100, 255), 
                 random.randint(100, 255)
             )
+    
+    # 添加字典访问支持
+    def __getitem__(self, key):
+        """支持字典式访问"""
+        if hasattr(self, key):
+            return getattr(self, key)
+        
+        # 处理别名
+        alias_map = {
+            'load': 'current_load',
+            'type': 'vehicle_type',
+            'id': 'vehicle_id'
+        }
+        
+        if key in alias_map:
+            return getattr(self, alias_map[key])
+        
+        raise KeyError(f"'{key}' not found in VehicleInfo")
+    
+    def __setitem__(self, key, value):
+        """支持字典式设置"""
+        # 处理别名
+        alias_map = {
+            'load': 'current_load',
+            'type': 'vehicle_type',
+            'id': 'vehicle_id'
+        }
+        
+        actual_key = alias_map.get(key, key)
+        
+        if hasattr(self, actual_key):
+            setattr(self, actual_key, value)
+        else:
+            # 对于不存在的属性，动态添加
+            setattr(self, key, value)
+    
+    def __contains__(self, key):
+        """支持 'in' 操作"""
+        alias_map = {
+            'load': 'current_load',
+            'type': 'vehicle_type',
+            'id': 'vehicle_id'
+        }
+        
+        return hasattr(self, key) or key in alias_map
+    
+    def get(self, key, default=None):
+        """支持 dict.get() 方法"""
+        try:
+            return self[key]
+        except KeyError:
+            return default
 
 class ComponentManager:
     """组件管理器 - 统一管理系统组件"""
@@ -1003,80 +1055,244 @@ class OptimizedOpenPitMineEnv:
         
         if self.spatial_index:
             self.spatial_index.clear()
-    def load_from_file(self, filename: str) -> bool:
-        """从文件加载环境"""
-        try:
-            self.set_state(EnvironmentState.LOADING)
+    def load_from_file(self, filename):
+        """从文件加载环境
+        
+        Args:
+            filename (str): 环境文件路径
             
+        Returns:
+            bool: 加载是否成功
+        """
+        try:
             # 读取文件
             with open(filename, 'r', encoding='utf-8') as f:
                 data = json.load(f)
-            
 
-
-            # 清空当前环境
-            self._clear_environment()
-            
-            # 加载配置
+            # 加载配置和更新尺寸
             config_data = data.get("config", {})
-            self.config = EnvironmentConfig(**config_data)
-            self.width = self.config.width
-            self.height = self.config.height
-            self.grid_resolution = self.config.grid_resolution
+            if config_data:
+                self.config = EnvironmentConfig(**config_data)
+                self.width = self.config.width
+                self.height = self.config.height
+                self.grid_resolution = self.config.grid_resolution
+            else:
+                # 如果没有config对象，直接从根级别读取尺寸
+                if "width" in data:
+                    self.width = int(data["width"])
+                if "height" in data:
+                    self.height = int(data["height"])
+                if "grid_resolution" in data:
+                    self.grid_resolution = float(data["grid_resolution"])
+                
+                # 更新配置对象
+                self.config.width = self.width
+                self.config.height = self.height
+                self.config.grid_resolution = self.grid_resolution
             
-            # 重新初始化网格和空间索引
+            # 重新初始化网格（使用新的尺寸）
             self.grid = np.zeros((self.width, self.height), dtype=np.uint8)
+            
+            # 重新初始化空间索引
             if self.config.spatial_indexing_enabled:
                 self.spatial_index = SpatialIndex(self.width, self.height)
-            else:
-                self.spatial_index = None
             
-            # 加载环境数据
-            env_data = data.get("environment", {})
+            # 清空障碍点列表
+            self.obstacle_points = []
+            self.grid = np.zeros((self.width, self.height), dtype=np.uint8)
             
             # 加载障碍物
-            for obstacle in env_data.get("obstacles", []):
-                self.add_obstacle_point(obstacle["x"], obstacle["y"])
+            for obstacle in data.get("obstacles", []):
+                if isinstance(obstacle, dict):
+                    x = obstacle.get("x", 0)
+                    y = obstacle.get("y", 0)
+                    if "width" in obstacle and "height" in obstacle:
+                        # 矩形障碍物
+                        self.add_obstacle(x, y, obstacle["width"], obstacle["height"])
+                    else:
+                        # 单点障碍物
+                        self.add_obstacle_point(x, y)
             
-            # 加载关键点
-            for point_data in env_data.get("loading_points", []):
-                self.add_loading_point((point_data["x"], point_data["y"], point_data["theta"]))
+            # 加载装载点
+            self.loading_points = []
+            for point in data.get("loading_points", []):
+                if isinstance(point, dict):
+                    x = point.get("x", 0)
+                    y = point.get("y", 0)
+                    theta = point.get("theta", 0.0)
+                    self.add_loading_point((x, y, theta))
+                elif isinstance(point, list) and len(point) >= 2:
+                    row, col = point[0], point[1]
+                    theta = 0.0 if len(point) <= 2 else point[2]
+                    self.add_loading_point((col, row, theta))
             
-            for point_data in env_data.get("unloading_points", []):
-                self.add_unloading_point((point_data["x"], point_data["y"], point_data["theta"]))
+            # 加载卸载点
+            self.unloading_points = []
+            for point in data.get("unloading_points", []):
+                if isinstance(point, dict):
+                    x = point.get("x", 0)
+                    y = point.get("y", 0)
+                    theta = point.get("theta", 0.0)
+                    self.add_unloading_point((x, y, theta))
+                elif isinstance(point, list) and len(point) >= 2:
+                    row, col = point[0], point[1]
+                    theta = 0.0 if len(point) <= 2 else point[2]
+                    self.add_unloading_point((col, row, theta))
             
-            for point_data in env_data.get("parking_areas", []):
-                self.add_parking_area((point_data["x"], point_data["y"], point_data["theta"]))
+            # 加载停车区
+            self.parking_areas = []
+            for point in data.get("parking_areas", []):
+                if isinstance(point, dict):
+                    x = point.get("x", 0)
+                    y = point.get("y", 0)
+                    theta = point.get("theta", 0.0)
+                    capacity = point.get("capacity", 5)
+                    self.add_parking_area((x, y, theta), capacity)
+                elif isinstance(point, list) and len(point) >= 2:
+                    row, col = point[0], point[1]
+                    theta = 0.0 if len(point) <= 2 else point[2]
+                    capacity = 5 if len(point) <= 3 else point[3]
+                    self.add_parking_area((col, row, theta), capacity)
             
-            # 加载车辆
-            vehicles_data = data.get("vehicles", {})
-            for vehicle_id, vehicle_data in vehicles_data.items():
-                self._load_vehicle_from_data(vehicle_id, vehicle_data)
+
+
+            # 加载车辆信息
+            self.vehicles = OrderedDict()
+
+            # 处理vehicles_info字段（地图绘制器格式）
+            for vehicle in data.get("vehicles_info", []):
+                if isinstance(vehicle, dict):
+                    vehicle_id = str(vehicle.get("id", f"v_{len(self.vehicles) + 1}"))
+                    x = float(vehicle.get("x", 0))
+                    y = float(vehicle.get("y", 0))
+                    theta = float(vehicle.get("theta", 0.0))
+                    v_type = vehicle.get("type", "dump_truck")
+                    max_load = float(vehicle.get("max_load", 100))
+                    
+                    # 添加车辆
+                    if self.add_vehicle(vehicle_id, (x, y, theta), None, v_type, max_load):
+                        print(f"✓ 成功添加车辆: {vehicle_id} at ({x}, {y})")
+
+            # 处理标准vehicles字段
+            for vehicle in data.get("vehicles", []):
+                if isinstance(vehicle, dict):
+                    vehicle_id = str(vehicle.get("id", f"v_{len(self.vehicles) + 1}"))
+                    x = vehicle.get("x", 0)
+                    y = vehicle.get("y", 0)
+                    theta = vehicle.get("theta", 0.0)
+                    v_type = vehicle.get("type", "dump_truck")
+                    max_load = vehicle.get("max_load", 100)
+                    
+                    if self.add_vehicle(vehicle_id, (x, y, theta), None, v_type, max_load):
+                        vehicle_info = self.vehicles[vehicle_id]
+                        vehicle_info['status'] = vehicle.get("status", "idle")
+                        vehicle_info['load'] = vehicle.get("load", 0)
+                        vehicle_info['completed_cycles'] = vehicle.get("completed_cycles", 0)
+
+            print(f"✓ 总共加载了 {len(self.vehicles)} 个车辆")
             
-            # 加载仿真状态
-            sim_data = data.get("simulation", {})
-            self.current_time = sim_data.get("current_time", 0.0)
-            self.time_step = sim_data.get("time_step", self.config.default_time_step)
-            self.running = sim_data.get("running", False)
-            self.paused = sim_data.get("paused", False)
+            # 加载组件状态
+            self._saved_backbone_data = data.get("backbone_network")
+            self._saved_scheduler_states = data.get("scheduler_states")
+            self._saved_traffic_states = data.get("traffic_manager")
             
-            # 加载统计信息
-            if "statistics" in data:
-                self.stats.update(data["statistics"])
+            # 设置环境状态
+            self.current_time = data.get("current_time", 0.0)
+            self.running = data.get("running", False)
+            self.paused = data.get("paused", False)
             
-            # 恢复组件状态
-            if "components" in data:
-                self.component_manager.restore_from_save_data(data["components"])
-            
-            logger.info(f"环境已从 {filename} 加载")
-            self.set_state(EnvironmentState.READY)
-            
-            self._emit_event('environment_loaded', {'filename': filename})
             return True
             
         except Exception as e:
-            logger.error(f"加载环境失败: {e}")
-            self.set_state(EnvironmentState.ERROR)
+            print(f"加载环境失败: {str(e)}")
+            import traceback
+            traceback.print_exc()
             return False
+
+    def _load_vehicle_from_data(self, vehicle_id: str, vehicle_data: dict) -> bool:
+        """从数据加载车辆"""
+        try:
+            # 提取车辆位置信息
+            position_data = vehicle_data.get('position', {})
+            if isinstance(position_data, dict):
+                x = position_data.get('x', 0)
+                y = position_data.get('y', 0)
+                theta = position_data.get('theta', 0)
+            elif isinstance(position_data, (list, tuple)):
+                x = position_data[0] if len(position_data) > 0 else 0
+                y = position_data[1] if len(position_data) > 1 else 0
+                theta = position_data[2] if len(position_data) > 2 else 0
+            else:
+                x, y, theta = 0, 0, 0
+            
+            position = (float(x), float(y), float(theta))
+            
+            # 提取其他车辆属性
+            vehicle_type = vehicle_data.get('vehicle_type', 'dump_truck')
+            max_load = vehicle_data.get('max_load', 100)
+            
+            # 目标位置（可选）
+            goal_data = vehicle_data.get('goal')
+            goal = None
+            if goal_data:
+                if isinstance(goal_data, dict):
+                    goal = (goal_data.get('x', 0), goal_data.get('y', 0), goal_data.get('theta', 0))
+                elif isinstance(goal_data, (list, tuple)) and len(goal_data) >= 2:
+                    goal = (goal_data[0], goal_data[1], goal_data[2] if len(goal_data) > 2 else 0)
+            
+            # 添加车辆到环境
+            return self.add_vehicle(
+                vehicle_id=vehicle_id,
+                position=position,
+                goal=goal,
+                vehicle_type=vehicle_type,
+                max_load=max_load
+            )
+            
+        except Exception as e:
+            logger.error(f"加载车辆数据失败 {vehicle_id}: {e}")
+            return False
+
+    # 在 ComponentManager 类中添加以下方法：
+
+    def restore_from_save_data(self, save_data: dict):
+        """从保存数据恢复组件状态"""
+        try:
+            for component_name, component_data in save_data.items():
+                if component_name in self.components:
+                    component = self.components[component_name]
+                    # 如果组件有restore方法，调用它
+                    if hasattr(component, 'restore_from_data'):
+                        component.restore_from_data(component_data)
+                    elif hasattr(component, 'load_state'):
+                        component.load_state(component_data)
+                    else:
+                        logger.warning(f"组件 {component_name} 没有恢复方法")
+            
+            logger.info("组件状态恢复完成")
+            
+        except Exception as e:
+            logger.error(f"恢复组件状态失败: {e}")
+
+    def get_save_data(self) -> dict:
+        """获取组件保存数据"""
+        save_data = {}
+        
+        for component_name, component in self.components.items():
+            try:
+                if hasattr(component, 'get_save_data'):
+                    save_data[component_name] = component.get_save_data()
+                elif hasattr(component, 'get_state'):
+                    save_data[component_name] = component.get_state()
+                else:
+                    # 对于没有保存方法的组件，保存基本信息
+                    save_data[component_name] = {
+                        'component_type': type(component).__name__,
+                        'initialized': hasattr(component, 'initialize')
+                    }
+            except Exception as e:
+                logger.error(f"获取组件 {component_name} 保存数据失败: {e}")
+        
+        return save_data
 # 向后兼容性
 OpenPitMineEnv = OptimizedOpenPitMineEnv

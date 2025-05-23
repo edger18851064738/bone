@@ -1070,11 +1070,14 @@ class MineGraphicsView(QGraphicsView):
         x, y = scene_pos.x(), scene_pos.y()
         self.coord_label.setText(f"X: {x:.1f}, Y: {y:.1f}")
     
-    def set_environment(self, env, planner=None):
-        """设置环境"""
-        self.mine_scene.set_environment(env, planner)
+    def set_environment(self, env):
+        """设置环境 - 保持简单的居中逻辑"""
+        self.mine_scene.set_environment(env)
         if env:
+            # ✅ 保持简单直接的居中，像简化版本一样
             self.fitInView(self.mine_scene.sceneRect(), Qt.KeepAspectRatio)
+            self.current_scale = self.transform().m11()
+            self.zoom_label.setText(f"缩放: {int(self.current_scale * 100)}%")
     
     def update_vehicles(self):
         """更新车辆"""

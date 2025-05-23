@@ -16,7 +16,7 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QH
                             QGraphicsPathItem, QGraphicsLineItem, QGraphicsTextItem, QGraphicsItemGroup,
                             QGridLayout, QFrame, QStyleFactory, QScrollArea, QTableWidget, 
                             QTableWidgetItem, QListWidget, QListWidgetItem, QTreeWidget, 
-                            QTreeWidgetItem, QHeaderView, QLCDNumber, QDial,QPlainTextEdit)
+                            QTreeWidgetItem, QHeaderView, QLCDNumber, QDial,QPlainTextEdit,QGraphicsObject)
 from PyQt5.QtGui import (QIcon, QFont, QPixmap, QPen, QBrush, QColor, QPainter, QPainterPath,
                         QTransform, QPolygonF, QLinearGradient, QRadialGradient, QPalette,
                         QFontMetrics, QConicalGradient, QCursor)
@@ -254,7 +254,7 @@ VEHICLE_STATUS_COLORS = {
     'maintenance': QColor(235, 160, 172) # 红色
 }
 
-class AnimatedVehicleItem(QGraphicsItemGroup):
+class AnimatedVehicleItem(QGraphicsObject):
     """动画车辆图形项"""
     def __init__(self, vehicle_id, vehicle_data, parent=None):
         super().__init__(parent)
@@ -1096,19 +1096,24 @@ class OptimizedMineView(QGraphicsView):
     
     def set_environment(self, env):
         """设置环境"""
-        self.mine_scene.set_environment(env)
         if env:
+            # 先设置场景环境（更新场景尺寸）
+            self.mine_scene.set_environment(env)
+            # 再进行视图适配
             self.fitInView(self.mine_scene.sceneRect(), Qt.KeepAspectRatio)
             self.current_scale = self.transform().m11()
             self.zoom_label.setText(f"缩放: {int(self.current_scale * 100)}%")
+
     
     def set_backbone_network(self, backbone_network):
-        """设置骨干路径网络"""
-        self.mine_scene.set_backbone_network(backbone_network)
-    
+        """设置骨干网络 - 避免重绘"""
+        # 只设置引用，不立即更新可视化
+        self.mine_scene.backbone_network = backbone_network
+
     def set_traffic_manager(self, traffic_manager):
-        """设置交通管理器"""
-        self.mine_scene.set_traffic_manager(traffic_manager)
+        """设置交通管理器 - 避免重绘"""
+        # 只设置引用
+        self.mine_scene.traffic_manager = traffic_manager
     
     def update_vehicles(self):
         """更新车辆"""
@@ -1534,8 +1539,8 @@ class VehicleDetailPanel(QWidget):
         
         vehicle = self.env.vehicles[v_id]
         
-        # 更新基本信息
-        pos = vehicle.get('position', (0, 0, 0))
+        # 更新基本信息 - 适配VehicleInfo对象
+        pos = vehicle.position if hasattr(vehicle, 'position') else (0, 0, 0)
         self.info_labels["position"].setText(f"({pos[0]:.1f}, {pos[1]:.1f})")
         
         status_map = {
@@ -1543,18 +1548,27 @@ class VehicleDetailPanel(QWidget):
             'loading': '装载中', 'unloading': '卸载中',
             'waiting': '等待中', 'maintenance': '维护中'
         }
-        status = vehicle.get('status', 'idle')
+        status = vehicle.status if hasattr(vehicle, 'status') else 'idle'
         self.info_labels["status"].setText(status_map.get(status, status))
         
-        load = vehicle.get('load', 0)
-        max_load = vehicle.get('max_load', 100)
-        self.info_labels["load"].setText(f"{load}/{max_load} ({load/max_load*100:.0f}%)")
+        current_load = vehicle.current_load if hasattr(vehicle, 'current_load') else 0
+        max_load = vehicle.max_load if hasattr(vehicle, 'max_load') else 100
+        self.info_labels["load"].setText(f"{current_load}/{max_load} ({current_load/max_load*100:.0f}%)")
         
         # 从调度器获取详细信息
         if self.scheduler:
             vehicle_info = self.scheduler.get_vehicle_info(v_id)
             if vehicle_info:
                 self._update_detailed_info(vehicle_info)
+            else:
+                # 直接使用VehicleInfo对象的属性
+                self.info_labels["speed"].setText(f"{getattr(vehicle, 'speed', 1.0):.1f}")
+                
+                heading = math.degrees(pos[2]) if len(pos) > 2 else 0
+                self.info_labels["heading"].setText(f"{heading:.0f}°")
+                
+                total_distance = getattr(vehicle, 'total_distance', 0)
+                self.info_labels["total_distance"].setText(f"{total_distance:.1f}")
     
     def _update_detailed_info(self, vehicle_info):
         """更新详细信息"""
@@ -2357,51 +2371,67 @@ class EnhancedMineGUI(QMainWindow):
             self.log(f"已选择地图文件: {os.path.basename(file_path)}")
     
     def load_environment(self):
-        """加载环境"""
+        """加载环境 - 分离复杂操作"""
         if not self.map_file_path:
             self.log("请先选择地图文件", "error")
             QMessageBox.warning(self, "警告", "请先选择地图文件")
             return
-        
+
         try:
             self.log("正在加载环境...")
             
-            # 创建环境
+            # 创建并加载环境
             self.env = OpenPitMineEnv()
-            
-            # 从文件加载
             if not self.env.load_from_file(self.map_file_path):
                 raise Exception("环境加载失败")
             
-            # 设置到图形视图
+            # ✅ 先设置到图形视图并居中 - 像简化版本一样简单
             self.graphics_view.set_environment(self.env)
             
-            # 更新控制面板
-            self.update_point_combos()
+            # 调试信息：输出实际加载的尺寸
+            self.log(f"环境尺寸: {self.env.width} x {self.env.height}")
+            self.log(f"场景矩形: {self.graphics_view.mine_scene.sceneRect()}")
             
-            # 创建系统组件
+            # ✅ 然后处理其他UI更新（不影响视图）
+            self.update_point_combos()
+            self.vehicle_panel.set_environment(self.env, None)  # 先不传调度器
+            
+            # ✅ 最后创建复杂组件（分离操作）
             self.create_system_components()
             
-            # 更新各个面板
-            self.vehicle_panel.set_environment(self.env, self.vehicle_scheduler)
+            # ✅ 组件创建完成后，更新相关面板
+            self.vehicle_panel.scheduler = self.vehicle_scheduler  # 设置调度器
             self.stats_widget.set_scheduler(self.vehicle_scheduler)
             self.stats_widget.set_traffic_manager(self.traffic_manager)
             self.chart_widget.set_scheduler(self.vehicle_scheduler)
             
-            # 设置视图引用
-            self.graphics_view.set_backbone_network(self.backbone_network)
-            self.graphics_view.set_traffic_manager(self.traffic_manager)
+            # ✅ 只在需要时设置组件引用（不触发重绘）
+            self.graphics_view.mine_scene.backbone_network = self.backbone_network
+            self.graphics_view.mine_scene.traffic_manager = self.traffic_manager
             
             self.log("环境加载成功", "success")
             self.status_label.setText("环境已加载")
-            
-            # 启用控件
             self.enable_controls(True)
             
         except Exception as e:
             self.log(f"加载环境失败: {str(e)}", "error")
             QMessageBox.critical(self, "错误", f"加载环境失败:\n{str(e)}")
-    
+
+    def _center_view(self):
+        """居中显示视图"""
+        if self.env:
+            # 确保场景矩形正确
+            self.graphics_view.mine_scene.setSceneRect(0, 0, self.env.width, self.env.height)
+            # 强制更新场景
+            self.graphics_view.mine_scene.update()
+            # 居中显示
+            self.graphics_view.fitInView(
+                self.graphics_view.mine_scene.sceneRect(), Qt.KeepAspectRatio
+            )
+            # 更新缩放标签
+            self.graphics_view.current_scale = self.graphics_view.transform().m11()
+            self.graphics_view.zoom_label.setText(f"缩放: {int(self.graphics_view.current_scale * 100)}%")
+            self.log("视图已居中显示")
     def save_environment(self):
         """保存环境"""
         if not self.env:
@@ -2509,7 +2539,6 @@ class EnhancedMineGUI(QMainWindow):
             self.log("正在生成骨干路径网络...")
             self.status_label.setText("生成骨干网络中...")
             
-            # 获取参数
             quality_threshold = self.control_panel.quality_spin.value()
             interface_spacing = self.control_panel.interface_spacing_spin.value()
             
@@ -2521,21 +2550,17 @@ class EnhancedMineGUI(QMainWindow):
             generation_time = time.time() - start_time
             
             if success:
-                # 调试信息
-                self.backbone_network.debug_interface_system()
-                
-                # 更新到其他组件
+                # 更新组件引用
                 self.path_planner.set_backbone_network(self.backbone_network)
                 self.traffic_manager.set_backbone_network(self.backbone_network)
                 self.vehicle_scheduler.set_backbone_network(self.backbone_network)
                 
-                # 在图形视图中显示
-                self.graphics_view.set_backbone_network(self.backbone_network)
+                # ✅ 只有在这里才更新可视化显示
+                self.graphics_view.mine_scene.set_backbone_network(self.backbone_network)
                 
                 path_count = len(self.backbone_network.backbone_paths)
                 interface_count = len(self.backbone_network.backbone_interfaces)
                 
-                # 更新控制面板统计
                 self.control_panel.update_backbone_stats(path_count, interface_count)
                 
                 self.log(f"骨干路径网络生成成功 - {path_count} 条路径，"
@@ -2591,7 +2616,7 @@ class EnhancedMineGUI(QMainWindow):
         self.status_label.setText("仿真已暂停")
     
     def reset_simulation(self):
-        """重置仿真"""
+        """重置仿真 - 保持简单"""
         if self.is_simulating:
             self.pause_simulation()
         
@@ -2601,20 +2626,18 @@ class EnhancedMineGUI(QMainWindow):
         if self.vehicle_scheduler:
             self.vehicle_scheduler.initialize_vehicles()
         
-        self.simulation_time = 0
+        # ✅ 重置时也保持简单的设置
         self.graphics_view.set_environment(self.env)
-        
-        if self.backbone_network:
-            self.graphics_view.set_backbone_network(self.backbone_network)
         
         self.control_panel.progress_bar.setValue(0)
         self.vehicle_panel.set_environment(self.env, self.vehicle_scheduler)
         
         # 重置图表
-        self.chart_widget.current_time = 0
-        self.chart_widget.time_data.clear()
-        self.chart_widget.utilization_data.clear()
-        self.chart_widget.completion_data.clear()
+        if hasattr(self.chart_widget, 'current_time'):
+            self.chart_widget.current_time = 0
+            self.chart_widget.time_data.clear()
+            self.chart_widget.utilization_data.clear()
+            self.chart_widget.completion_data.clear()
         
         self.log("仿真已重置")
         self.status_label.setText("仿真已重置")

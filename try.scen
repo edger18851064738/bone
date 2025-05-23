@@ -1,0 +1,24 @@
+{
+  "scenarios": [
+    {
+      "id": 1,
+      "initial_position": [
+        20,
+        34,
+        0.0
+      ],
+      "type": "dump_truck",
+      "max_load": 100.0
+    },
+    {
+      "id": 2,
+      "initial_position": [
+        85,
+        70,
+        3.141592653589793
+      ],
+      "type": "dump_truck",
+      "max_load": 100.0
+    }
+  ]
+}

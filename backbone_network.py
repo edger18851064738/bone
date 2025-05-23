@@ -1118,8 +1118,8 @@ class SimplifiedBackbonePathNetwork:
             end_pos = end_point['position']
             
             # 多次尝试增加成功率
-            for attempt in range(3):
-                max_iterations = 3000 + attempt * 1000
+            for attempt in range(5):
+                max_iterations = 4000 + attempt * 1000
                 
                 path = self.planner.plan_path(start_pos, end_pos, max_iterations=max_iterations)
                 
