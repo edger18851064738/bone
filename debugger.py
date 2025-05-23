@@ -3115,63 +3115,83 @@ class OptimizedMineGUI(QMainWindow):
             self.log(f"加载环境失败: {str(e)}", "error")
     
     def create_system_components(self):
-        """创建系统组件"""
+        """创建系统组件 - 修复版"""
         if not self.env:
             return
         
         try:
-            # 创建骨干路径网络
-            self.backbone_network = OptimizedBackbonePathNetwork(self.env)
+            # 1. 创建骨干路径网络
+            self.backbone_network = SimplifiedBackbonePathNetwork(self.env)
             
-            # 创建路径规划器
-            self.path_planner = OptimizedPathPlanner(self.env)
-            self.path_planner.set_backbone_network(self.backbone_network)
-            
-            # 创建交通管理器
-            self.traffic_manager = OptimizedTrafficManager(self.env, self.backbone_network)
-            
-            # 创建车辆调度器（优先使用ECBS版本）
-            try:
-                self.vehicle_scheduler = ECBSVehicleScheduler(
-                    self.env, 
-                    self.path_planner, 
-                    self.traffic_manager,
-                    self.backbone_network
-                )
-                self.log("使用ECBS增强型车辆调度器", "success")
-            except Exception as e:
-                self.vehicle_scheduler = VehicleScheduler(
-                    self.env, 
-                    self.path_planner, 
-                    self.backbone_network,
-                    self.traffic_manager
-                )
-                self.log("使用标准车辆调度器", "warning")
-            
-            # 初始化车辆状态
-            self.vehicle_scheduler.initialize_vehicles()
-            
-            # 设置系统组件到性能监控
-            self.performance_panel.set_system_components(
-                env=self.env,
+            # 2. 创建路径规划器（正确设置参数顺序）
+            self.path_planner = SimplifiedPathPlanner(
+                env=self.env, 
                 backbone_network=self.backbone_network,
-                path_planner=self.path_planner,
-                traffic_manager=self.traffic_manager,
-                vehicle_scheduler=self.vehicle_scheduler
+                rrt_planner=None,  # 将自动创建
+                traffic_manager=None  # 稍后设置
             )
             
-            # 创建任务模板
-            if self.env.loading_points and self.env.unloading_points:
-                if hasattr(self.vehicle_scheduler, 'create_ecbs_mission_template'):
-                    self.vehicle_scheduler.create_ecbs_mission_template("default")
-                else:
-                    self.vehicle_scheduler.create_mission_template("default")
+            # 3. 创建交通管理器
+            self.traffic_manager = OptimizedTrafficManager(self.env, self.backbone_network)
             
-            self.log("系统组件已初始化", "success")
+            # 4. 设置路径规划器的交通管理器引用
+            self.path_planner.set_traffic_manager(self.traffic_manager)
+            
+            # 5. 创建车辆调度器 - 根据选择
+            scheduler_type = self.control_panel.scheduler_combo.currentIndex()
+            if scheduler_type == 1:  # ECBS增强
+                self.vehicle_scheduler = SimplifiedECBSVehicleScheduler(
+                    env=self.env, 
+                    path_planner=self.path_planner,  # 注意参数顺序
+                    traffic_manager=self.traffic_manager, 
+                    backbone_network=self.backbone_network
+                )
+                self.log("使用ECBS增强调度器", "success")
+            else:  # 标准调度
+                self.vehicle_scheduler = SimplifiedVehicleScheduler(
+                    env=self.env,
+                    path_planner=self.path_planner,  # 修复：添加缺失的参数
+                    traffic_manager=self.traffic_manager,  # 修复：参数顺序
+                    backbone_network=self.backbone_network
+                )
+                self.log("使用标准调度器", "success")
+            
+            # 6. 建立组件间的双向引用
+            self._establish_component_references()
+            
+            # 7. 初始化车辆状态
+            self.vehicle_scheduler.initialize_vehicles()
+            
+            # 8. 创建默认任务模板
+            if self.env.loading_points and self.env.unloading_points:
+                self.vehicle_scheduler.create_enhanced_mission_template("default")
+            
+            self.log("系统组件初始化完成", "success")
             
         except Exception as e:
             self.log(f"系统组件初始化失败: {str(e)}", "error")
-    
+            import traceback
+            traceback.print_exc()
+    def _establish_component_references(self):
+        """建立组件间的双向引用"""
+        # 设置骨干网络到各组件
+        if self.path_planner and hasattr(self.path_planner, 'set_backbone_network'):
+            self.path_planner.set_backbone_network(self.backbone_network)
+        
+        if self.traffic_manager and hasattr(self.traffic_manager, 'set_backbone_network'):
+            self.traffic_manager.set_backbone_network(self.backbone_network)
+        
+        # 设置RRT规划器到骨干网络（如果支持）
+        if (self.backbone_network and 
+            hasattr(self.backbone_network, 'set_rrt_planner') and
+            self.path_planner and 
+            hasattr(self.path_planner, 'rrt_planner')):
+            self.backbone_network.set_rrt_planner(self.path_planner.rrt_planner)
+        
+        # 设置环境引用到各组件（用于保存状态）
+        self.env.set_backbone_network(self.backbone_network)
+        self.env.set_vehicle_scheduler(self.vehicle_scheduler)
+        self.env.set_traffic_manager(self.traffic_manager)    
     def generate_backbone_network(self):
         """生成骨干路径网络"""
         if not self.env:

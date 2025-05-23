@@ -920,19 +920,7 @@ class OptimizedVehicleScheduler:
             print(f"任务 {task.task_id} 路径规划失败: {e}")
         
         return False
-    def update_backbone_visualization(self):
-        """更新骨干路径可视化"""
-        if self.backbone_visualizer:
-            self.removeItem(self.backbone_visualizer)
-        
-        if self.backbone_network and self.show_options['backbone']:
-            self.backbone_visualizer = BackbonePathVisualization(self.backbone_network)
-            self.addItem(self.backbone_visualizer)
-    def set_backbone_network(self, backbone_network):
-        """设置骨干路径网络"""
-        self.backbone_network = backbone_network
-        self.update_backbone_visualization()
-        self.update_interface_display()    
+
     def update(self, time_delta: float):
         """更新调度器状态"""
         current_time = time.time()
@@ -1469,6 +1457,69 @@ class OptimizedVehicleScheduler:
         }
         
         return info
+    def set_backbone_network(self, backbone_network):
+        """设置骨干路径网络 - 正确的实现"""
+        self.backbone_network = backbone_network
+        
+        # 更新相关组件
+        if self.task_assigner:
+            self.task_assigner.backbone_network = backbone_network
+        
+        if self.predictive_scheduler:
+            self.predictive_scheduler.backbone_network = backbone_network
+        
+        print("已设置骨干路径网络到车辆调度器")
+    
+    def get_save_data(self) -> Dict:
+        """获取保存数据 - 环境保存时需要"""
+        return {
+            'total_tasks': self.stats['total_tasks'],
+            'completed_tasks': self.stats['completed_tasks'],
+            'failed_tasks': self.stats['failed_tasks'],
+            'vehicle_states': {
+                vid: {
+                    'completed_tasks': state.completed_tasks,
+                    'total_distance': state.total_distance,
+                    'utilization_rate': state.utilization_rate,
+                    'backbone_usage_count': state.backbone_usage_count,
+                    'direct_path_count': state.direct_path_count,
+                    'interface_efficiency': state.interface_efficiency
+                }
+                for vid, state in self.vehicle_states.items()
+            },
+            'mission_templates': list(self.mission_templates.keys()),
+            'scheduling_strategy': self.scheduling_strategy
+        }
+    
+    def restore_from_save_data(self, save_data: Dict):
+        """从保存数据恢复状态"""
+        try:
+            # 恢复统计信息
+            self.stats.update({
+                'total_tasks': save_data.get('total_tasks', 0),
+                'completed_tasks': save_data.get('completed_tasks', 0),
+                'failed_tasks': save_data.get('failed_tasks', 0)
+            })
+            
+            # 恢复车辆状态
+            saved_vehicle_states = save_data.get('vehicle_states', {})
+            for vehicle_id, saved_state in saved_vehicle_states.items():
+                if vehicle_id in self.vehicle_states:
+                    state = self.vehicle_states[vehicle_id]
+                    state.completed_tasks = saved_state.get('completed_tasks', 0)
+                    state.total_distance = saved_state.get('total_distance', 0)
+                    state.utilization_rate = saved_state.get('utilization_rate', 0)
+                    state.backbone_usage_count = saved_state.get('backbone_usage_count', 0)
+                    state.direct_path_count = saved_state.get('direct_path_count', 0)
+                    state.interface_efficiency = saved_state.get('interface_efficiency', 0.5)
+            
+            # 恢复调度策略
+            self.scheduling_strategy = save_data.get('scheduling_strategy', 'predictive')
+            
+            print("车辆调度器状态已恢复")
+            
+        except Exception as e:
+            print(f"恢复车辆调度器状态失败: {e}")
 
 # ECBS增强版调度器
 class ECBSEnhancedVehicleScheduler(OptimizedVehicleScheduler):
@@ -1478,7 +1529,7 @@ class ECBSEnhancedVehicleScheduler(OptimizedVehicleScheduler):
         super().__init__(env, path_planner, traffic_manager, backbone_network)
         
         # ECBS特有设置
-        self.conflict_detection_interval = 10.0  # 10秒检测一次冲突
+        self.conflict_detection_interval = 10.0
         self.last_conflict_check = 0
         self.ecbs_enabled = True
         
@@ -1491,6 +1542,25 @@ class ECBSEnhancedVehicleScheduler(OptimizedVehicleScheduler):
         }
         
         print("初始化ECBS增强版车辆调度器")
+    
+    def get_save_data(self) -> Dict:
+        """获取保存数据 - 包含ECBS统计"""
+        base_data = super().get_save_data()
+        base_data['ecbs_stats'] = self.conflict_stats.copy()
+        base_data['conflict_detection_interval'] = self.conflict_detection_interval
+        base_data['ecbs_enabled'] = self.ecbs_enabled
+        return base_data
+    
+    def restore_from_save_data(self, save_data: Dict):
+        """从保存数据恢复状态 - 包含ECBS数据"""
+        super().restore_from_save_data(save_data)
+        
+        # 恢复ECBS特有数据
+        if 'ecbs_stats' in save_data:
+            self.conflict_stats.update(save_data['ecbs_stats'])
+        
+        self.conflict_detection_interval = save_data.get('conflict_detection_interval', 10.0)
+        self.ecbs_enabled = save_data.get('ecbs_enabled', True)
     
     def update(self, time_delta: float):
         """更新调度器状态 - 增加ECBS冲突检测"""

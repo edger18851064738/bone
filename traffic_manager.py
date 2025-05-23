@@ -590,7 +590,12 @@ class OptimizedTrafficManager:
         self.backbone_network = backbone_network
         self.ecbs_solver.backbone_network = backbone_network
         print("已更新骨干路径网络引用")
-    
+    def register_vehicle_path(self, vehicle_id: str, path: List, 
+                             start_time: float = 0, speed: float = 1.0) -> bool:
+        """兼容性方法 - 调用增强版本"""
+        return self.register_vehicle_path_enhanced(
+            vehicle_id, path, None, start_time, speed
+        )    
     def register_vehicle_path_enhanced(self, vehicle_id: str, path: List, 
                                      path_structure: Dict = None, 
                                      start_time: float = 0, speed: float = 1.0) -> bool:
@@ -640,7 +645,42 @@ class OptimizedTrafficManager:
             self.path_history[vehicle_id] = self.path_history[vehicle_id][-50:]
         
         return True
-    
+    def check_path_conflicts(self, vehicle_id: str, path: List) -> bool:
+        """检查路径是否有冲突"""
+        if not path or len(path) < 2:
+            return False
+        
+        # 临时注册路径进行冲突检测
+        temp_path_info = {
+            'path': path,
+            'structure': {},
+            'start_time': time.time(),
+            'speed': 1.0,
+            'registered_time': time.time(),
+            'quality_score': 0.5
+        }
+        
+        # 备份当前路径
+        original_path = self.active_paths.get(vehicle_id)
+        
+        # 临时设置新路径
+        self.active_paths[vehicle_id] = temp_path_info
+        
+        # 检测冲突
+        conflicts = self.detect_all_conflicts()
+        
+        # 恢复原路径
+        if original_path:
+            self.active_paths[vehicle_id] = original_path
+        else:
+            del self.active_paths[vehicle_id]
+        
+        # 检查是否有涉及该车辆的冲突
+        for conflict in conflicts:
+            if conflict.agent1 == vehicle_id or conflict.agent2 == vehicle_id:
+                return True
+        
+        return False    
     def detect_all_conflicts(self, current_time: float = 0) -> List[EnhancedConflict]:
         """综合冲突检测"""
         detection_start = time.time()
@@ -688,7 +728,107 @@ class OptimizedTrafficManager:
             conflicts = self._sequential_spatial_detection()
         
         return conflicts
+    def suggest_path_adjustment(self, vehicle_id: str, start: Tuple, 
+                              goal: Tuple) -> Optional[List]:
+        """建议路径调整"""
+        # 这是一个简化实现，实际应该更复杂
+        if not self.backbone_network:
+            return None
+        
+        # 尝试使用骨干网络获取替代路径
+        try:
+            target_type, target_id = self.backbone_network.identify_target_point(goal)
+            if target_type:
+                result = self.backbone_network.get_path_from_position_to_target(
+                    start, target_type, target_id
+                )
+                if result and result[0]:
+                    return result[0]
+        except Exception as e:
+            print(f"路径调整建议失败: {e}")
+        
+        return None
     
+    def get_save_data(self) -> Dict:
+        """获取保存数据"""
+        return {
+            'safety_distance': self.safety_distance,
+            'time_discretization': self.time_discretization,
+            'prediction_horizon': self.prediction_horizon,
+            'stats': self.stats.copy(),
+            'active_vehicles': len(self.active_paths),
+            'total_reservations': len(self.path_reservations),
+            'interface_reservations': len(self.interface_manager.reservations),
+            'ecbs_settings': {
+                'suboptimality_bound': getattr(self.ecbs_solver, 'suboptimality_bound', 1.3),
+                'max_search_time': getattr(self.ecbs_solver, 'max_search_time', 20.0),
+                'max_nodes_expanded': getattr(self.ecbs_solver, 'max_nodes_expanded', 800)
+            }
+        }
+    
+    def restore_from_save_data(self, save_data: Dict):
+        """从保存数据恢复状态"""
+        try:
+            # 恢复基本设置
+            self.safety_distance = save_data.get('safety_distance', 6.0)
+            self.time_discretization = save_data.get('time_discretization', 1.5)
+            self.prediction_horizon = save_data.get('prediction_horizon', 50.0)
+            
+            # 恢复统计信息
+            if 'stats' in save_data:
+                self.stats.update(save_data['stats'])
+            
+            # 恢复ECBS设置
+            ecbs_settings = save_data.get('ecbs_settings', {})
+            if ecbs_settings and self.ecbs_solver:
+                self.ecbs_solver.suboptimality_bound = ecbs_settings.get('suboptimality_bound', 1.3)
+                self.ecbs_solver.max_search_time = ecbs_settings.get('max_search_time', 20.0)
+                self.ecbs_solver.max_nodes_expanded = ecbs_settings.get('max_nodes_expanded', 800)
+            
+            print("交通管理器状态已恢复")
+            
+        except Exception as e:
+            print(f"恢复交通管理器状态失败: {e}")
+    
+    def clear_all_paths(self):
+        """清除所有路径（重置时使用）"""
+        self.active_paths.clear()
+        self.path_reservations.clear()
+        
+        # 清除接口预约
+        with self.interface_manager.reservation_lock:
+            self.interface_manager.reservations.clear()
+        
+        print("已清除所有交通管理数据")
+    
+    def update_vehicle_priority(self, vehicle_id: str, priority: int):
+        """更新车辆优先级"""
+        if vehicle_id in self.active_paths:
+            path_info = self.active_paths[vehicle_id]
+            path_info['priority'] = priority
+    
+    def get_vehicle_conflicts(self, vehicle_id: str) -> List[EnhancedConflict]:
+        """获取特定车辆的冲突"""
+        all_conflicts = self.detect_all_conflicts()
+        vehicle_conflicts = []
+        
+        for conflict in all_conflicts:
+            if conflict.agent1 == vehicle_id or conflict.agent2 == vehicle_id:
+                vehicle_conflicts.append(conflict)
+        
+        return vehicle_conflicts
+    
+    def force_replan_vehicle(self, vehicle_id: str) -> bool:
+        """强制重新规划车辆路径"""
+        if vehicle_id not in self.active_paths:
+            return False
+        
+        # 触发重新规划的逻辑
+        path_info = self.active_paths[vehicle_id]
+        path_info['needs_replan'] = True
+        path_info['replan_reason'] = 'manual_force'
+        
+        return True    
     def _parallel_spatial_detection(self) -> List[EnhancedConflict]:
         """并行空间冲突检测"""
         conflicts = []

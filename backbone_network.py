@@ -734,7 +734,158 @@ class SimplifiedBackbonePathNetwork:
             return base_relevance * priority_weight
         
         return 0.0
+    def get_save_data(self) -> Dict:
+        """获取保存数据"""
+        return {
+            'total_paths': len(self.backbone_paths),
+            'total_interfaces': len(self.backbone_interfaces),
+            'interface_spacing': self.interface_spacing,
+            'generation_stats': self.stats.copy(),
+            'paths_summary': {
+                path_id: {
+                    'id': path_id,
+                    'start_point_type': path_data["start_point"]["type"],
+                    'start_point_id': path_data["start_point"]["id"],
+                    'end_point_type': path_data["end_point"]["type"],
+                    'end_point_id': path_data["end_point"]["id"],
+                    'length': path_data.get("length", 0),
+                    'quality': path_data.get("quality", 0),
+                    'usage_count': path_data.get("usage_count", 0),
+                    'path_points_count': len(path_data.get("path", [])),
+                    'created_time': path_data.get("created_time", 0)
+                }
+                for path_id, path_data in self.backbone_paths.items()
+            },
+            'interface_states': {
+                interface_id: {
+                    'interface_id': interface.interface_id,
+                    'position': interface.position,
+                    'direction': interface.direction,
+                    'backbone_path_id': interface.backbone_path_id,
+                    'path_index': interface.path_index,
+                    'access_difficulty': interface.access_difficulty,
+                    'usage_count': interface.usage_count,
+                    'is_occupied': interface.is_occupied,
+                    'occupied_by': interface.occupied_by,
+                    'reservation_time': interface.reservation_time,
+                    # 增强接口的额外属性
+                    'accessibility_score': getattr(interface, 'accessibility_score', 0.5),
+                    'rrt_sampling_weight': getattr(interface, 'rrt_sampling_weight', 1.0),
+                    'usage_efficiency': getattr(interface, 'usage_efficiency', 0.0),
+                    'influence_radius': getattr(interface, 'influence_radius', 15.0)
+                }
+                for interface_id, interface in self.backbone_interfaces.items()
+            },
+            'rrt_integration': self.rrt_integration.copy(),
+            'path_quality_map': dict(self.path_quality_map),
+            'path_cache_stats': self.path_cache_stats.copy()
+        }
     
+    def restore_from_save_data(self, save_data: Dict):
+        """从保存数据恢复状态"""
+        try:
+            # 恢复基本设置
+            self.interface_spacing = save_data.get('interface_spacing', 10)
+            
+            # 恢复统计信息
+            if 'generation_stats' in save_data:
+                self.stats.update(save_data['generation_stats'])
+            
+            # 恢复接口状态
+            interface_states = save_data.get('interface_states', {})
+            for interface_id, state_data in interface_states.items():
+                if interface_id in self.backbone_interfaces:
+                    interface = self.backbone_interfaces[interface_id]
+                    
+                    # 恢复基本状态
+                    interface.usage_count = state_data.get('usage_count', 0)
+                    interface.is_occupied = state_data.get('is_occupied', False)
+                    interface.occupied_by = state_data.get('occupied_by')
+                    interface.reservation_time = state_data.get('reservation_time')
+                    
+                    # 恢复增强属性
+                    if hasattr(interface, 'accessibility_score'):
+                        interface.accessibility_score = state_data.get('accessibility_score', 0.5)
+                    if hasattr(interface, 'rrt_sampling_weight'):
+                        interface.rrt_sampling_weight = state_data.get('rrt_sampling_weight', 1.0)
+                    if hasattr(interface, 'usage_efficiency'):
+                        interface.usage_efficiency = state_data.get('usage_efficiency', 0.0)
+                    if hasattr(interface, 'influence_radius'):
+                        interface.influence_radius = state_data.get('influence_radius', 15.0)
+            
+            # 恢复RRT集成设置
+            if 'rrt_integration' in save_data:
+                self.rrt_integration.update(save_data['rrt_integration'])
+            
+            # 恢复路径质量映射
+            if 'path_quality_map' in save_data:
+                self.path_quality_map.update(save_data['path_quality_map'])
+            
+            # 恢复路径缓存统计
+            if 'path_cache_stats' in save_data:
+                self.path_cache_stats.update(save_data['path_cache_stats'])
+            
+            print("骨干网络状态已恢复")
+            
+        except Exception as e:
+            print(f"恢复骨干网络状态失败: {e}")
+    
+    def clear_all_data(self):
+        """清除所有数据（重置时使用）"""
+        self.backbone_paths.clear()
+        self.backbone_interfaces.clear()
+        self.path_interfaces.clear()
+        self.interface_spatial_index.clear()
+        self.paths_to_target.clear()
+        self.paths_from_source.clear()
+        self.sampling_regions.clear()
+        self.path_quality_map.clear()
+        
+        # 重置统计信息
+        self.stats = {
+            'total_paths': 0,
+            'total_interfaces': 0,
+            'interface_usage': defaultdict(int),
+            'generation_time': 0,
+            'average_path_length': 0,
+            'path_usage_count': defaultdict(int),
+            'total_usage': 0
+        }
+        
+        self.path_cache_stats = {
+            'total_requests': 0,
+            'cache_hits': 0,
+            'quality_improvements': 0
+        }
+        
+        print("已清除所有骨干网络数据")
+    
+    def get_network_health_status(self) -> Dict:
+        """获取网络健康状态"""
+        total_interfaces = len(self.backbone_interfaces)
+        available_interfaces = sum(
+            1 for interface in self.backbone_interfaces.values() 
+            if interface.is_available()
+        )
+        
+        total_usage = sum(
+            interface.usage_count for interface in self.backbone_interfaces.values()
+        )
+        
+        return {
+            'total_paths': len(self.backbone_paths),
+            'total_interfaces': total_interfaces,
+            'available_interfaces': available_interfaces,
+            'interface_availability_rate': available_interfaces / max(1, total_interfaces),
+            'total_usage': total_usage,
+            'average_usage_per_interface': total_usage / max(1, total_interfaces),
+            'network_utilization': min(1.0, total_usage / max(1, total_interfaces * 10)),
+            'rrt_integration_active': self.rrt_planner_ref is not None,
+            'cache_hit_rate': (
+                self.path_cache_stats['cache_hits'] / 
+                max(1, self.path_cache_stats['total_requests'])
+            )
+        }    
     def update_path_feedback(self, path, planning_time, quality_score, used_cache=False):
         """更新路径反馈信息"""
         if used_cache:
