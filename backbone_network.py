@@ -1,8 +1,9 @@
 import math
 import time
 import threading
+import numpy as np
 from collections import defaultdict, OrderedDict
-from RRT import RRTPlanner
+from RRT import OptimizedRRTPlanner
 
 class BackboneInterface:
     """骨干路径接口点"""
@@ -44,6 +45,80 @@ class BackboneInterface:
         return False
 
 
+class EnhancedBackboneInterface(BackboneInterface):
+    """增强的骨干路径接口 - 支持RRT预处理"""
+    
+    def __init__(self, interface_id, position, direction, backbone_path_id, 
+                 path_index, access_difficulty=0.0):
+        super().__init__(interface_id, position, direction, backbone_path_id, 
+                        path_index, access_difficulty)
+        
+        # 新增RRT集成属性
+        self.rrt_sampling_weight = 1.0  # RRT采样权重
+        self.accessibility_score = 0.5  # 可达性评分
+        self.usage_efficiency = 0.0     # 使用效率
+        self.last_quality_score = 0.0   # 最近路径质量
+        
+        # 性能统计
+        self.rrt_cache_hits = 0
+        self.total_planning_attempts = 0
+        self.average_planning_time = 0.0
+        
+        # 区域影响
+        self.influence_radius = 15.0    # 影响半径
+        self.sampling_hotspot = False   # 是否为采样热点
+    
+    def update_rrt_statistics(self, planning_time, path_quality, cache_hit=False):
+        """更新RRT相关统计信息"""
+        self.total_planning_attempts += 1
+        if cache_hit:
+            self.rrt_cache_hits += 1
+        
+        # 更新平均规划时间
+        alpha = 0.1  # 学习率
+        if self.average_planning_time == 0:
+            self.average_planning_time = planning_time
+        else:
+            self.average_planning_time = (1-alpha) * self.average_planning_time + alpha * planning_time
+        
+        # 更新质量评分
+        self.last_quality_score = path_quality
+        
+        # 更新使用效率
+        if self.total_planning_attempts > 0:
+            self.usage_efficiency = self.rrt_cache_hits / self.total_planning_attempts
+    
+    def calculate_sampling_priority(self):
+        """计算RRT采样优先级"""
+        # 基础权重
+        priority = self.rrt_sampling_weight
+        
+        # 可达性加权
+        priority *= (0.5 + self.accessibility_score)
+        
+        # 使用频率加权（使用越多优先级越高，但有上限）
+        usage_factor = min(2.0, 1.0 + self.usage_count * 0.1)
+        priority *= usage_factor
+        
+        # 效率加权
+        if self.usage_efficiency > 0.7:
+            priority *= 1.2  # 高效接口优先
+        elif self.usage_efficiency < 0.3:
+            priority *= 0.8  # 低效接口降权
+        
+        return priority
+    
+    def get_influence_region(self):
+        """获取接口影响区域（用于RRT采样）"""
+        return {
+            'center': (self.position[0], self.position[1]),
+            'radius': self.influence_radius,
+            'priority': self.calculate_sampling_priority(),
+            'direction_bias': self.direction,
+            'quality_hint': self.last_quality_score
+        }
+
+
 class SimplifiedBackbonePathNetwork:
     """
     完整的简化骨干路径网络 - 带接口系统优化版
@@ -59,7 +134,7 @@ class SimplifiedBackbonePathNetwork:
             'parking': []
         }
         
-        # 骨干接口系统 - 新增
+        # 骨干接口系统
         self.backbone_interfaces = {}  # {interface_id: BackboneInterface}
         self.path_interfaces = defaultdict(list)  # {path_id: [interface_ids]}
         self.interface_spacing = 10  # 接口间距（路径点数）
@@ -85,7 +160,156 @@ class SimplifiedBackbonePathNetwork:
             'total_usage': 0
         }
         
+        # RRT集成增强
+        self.rrt_integration = {
+            'preprocessing_enabled': True,
+            'adaptive_sampling': True,
+            'quality_feedback': True,
+            'cache_coordination': True
+        }
+        
+        # 预处理数据
+        self.sampling_regions = {}      # RRT采样区域
+        self.path_quality_map = {}      # 路径质量映射
+        self.access_heatmap = None      # 可达性热力图
+        
+        # 性能缓存
+        self.rrt_planner_ref = None     # RRT规划器引用
+        self.path_cache_stats = {
+            'total_requests': 0,
+            'cache_hits': 0,
+            'quality_improvements': 0
+        }
+        
         print("初始化带接口系统的骨干路径网络")
+    
+    def set_rrt_planner(self, rrt_planner):
+        """设置RRT规划器引用，启用深度集成"""
+        self.rrt_planner_ref = rrt_planner
+        if rrt_planner:
+            rrt_planner.set_backbone_network(self)
+            self._initialize_rrt_integration()
+    
+    def _initialize_rrt_integration(self):
+        """初始化RRT集成"""
+        print("初始化RRT深度集成...")
+        
+        # 预处理接口区域
+        self._preprocess_sampling_regions()
+        
+        # 构建可达性热力图
+        self._build_accessibility_heatmap()
+        
+        # 启用质量反馈循环
+        self._setup_quality_feedback()
+        
+        print(f"RRT集成完成: {len(self.sampling_regions)}个采样区域")
+    
+    def _preprocess_sampling_regions(self):
+        """预处理RRT采样区域"""
+        self.sampling_regions.clear()
+        
+        if not hasattr(self, 'backbone_interfaces'):
+            return
+        
+        for interface_id, interface in self.backbone_interfaces.items():
+            # 升级为增强接口
+            if not isinstance(interface, EnhancedBackboneInterface):
+                enhanced_interface = self._upgrade_interface(interface)
+                self.backbone_interfaces[interface_id] = enhanced_interface
+                interface = enhanced_interface
+            
+            # 计算接口影响区域
+            region = interface.get_influence_region()
+            self.sampling_regions[interface_id] = region
+        
+        # 添加骨干路径中点作为采样区域
+        self._add_backbone_midpoint_regions()
+    
+    def _upgrade_interface(self, old_interface):
+        """升级接口为增强版本"""
+        enhanced = EnhancedBackboneInterface(
+            old_interface.interface_id,
+            old_interface.position,
+            old_interface.direction,
+            old_interface.backbone_path_id,
+            old_interface.path_index,
+            old_interface.access_difficulty
+        )
+        
+        # 传递统计数据
+        enhanced.usage_count = old_interface.usage_count
+        enhanced.is_occupied = old_interface.is_occupied
+        enhanced.occupied_by = old_interface.occupied_by
+        enhanced.reservation_time = old_interface.reservation_time
+        
+        return enhanced
+    
+    def _add_backbone_midpoint_regions(self):
+        """添加骨干路径中点作为采样区域"""
+        for path_id, path_data in self.backbone_paths.items():
+            path = path_data.get('path', [])
+            if len(path) > 10:  # 只处理较长的路径
+                # 在路径中点添加采样区域
+                mid_index = len(path) // 2
+                mid_point = path[mid_index]
+                
+                region_id = f"{path_id}_midpoint"
+                self.sampling_regions[region_id] = {
+                    'center': (mid_point[0], mid_point[1]),
+                    'radius': 12.0,
+                    'priority': 0.8,
+                    'direction_bias': mid_point[2] if len(mid_point) > 2 else 0,
+                    'quality_hint': path_data.get('quality', 0.5)
+                }
+    
+    def _build_accessibility_heatmap(self):
+        """构建可达性热力图"""
+        if not self.env:
+            return
+        
+        # 简化的热力图：基于距离障碍物的距离
+        grid_size = 10  # 热力图网格大小
+        width_cells = self.env.width // grid_size
+        height_cells = self.env.height // grid_size
+        
+        self.access_heatmap = np.zeros((width_cells, height_cells))
+        
+        for i in range(width_cells):
+            for j in range(height_cells):
+                # 计算网格中心点
+                center_x = i * grid_size + grid_size // 2
+                center_y = j * grid_size + grid_size // 2
+                
+                # 计算可达性评分
+                accessibility = self._calculate_point_accessibility(center_x, center_y)
+                self.access_heatmap[i, j] = accessibility
+    
+    def _calculate_point_accessibility(self, x, y):
+        """计算点的可达性评分"""
+        # 基于周围障碍物密度
+        obstacle_count = 0
+        total_cells = 0
+        check_radius = 5
+        
+        for dx in range(-check_radius, check_radius + 1):
+            for dy in range(-check_radius, check_radius + 1):
+                check_x, check_y = x + dx, y + dy
+                if (0 <= check_x < self.env.width and 
+                    0 <= check_y < self.env.height):
+                    total_cells += 1
+                    if hasattr(self.env, 'grid') and self.env.grid[check_x, check_y] == 1:
+                        obstacle_count += 1
+        
+        if total_cells == 0:
+            return 0
+        
+        return 1.0 - (obstacle_count / total_cells)
+    
+    def _setup_quality_feedback(self):
+        """设置质量反馈循环"""
+        # 这里可以设置质量反馈机制
+        pass
     
     def generate_backbone_network(self, quality_threshold=0.4, interface_spacing=8):
         """
@@ -121,7 +345,11 @@ class SimplifiedBackbonePathNetwork:
             self._build_path_indexes()
             self._build_interface_spatial_index()
             
-            # 6. 统计信息
+            # 6. 如果有RRT集成，初始化相关系统
+            if self.rrt_planner_ref:
+                self._initialize_rrt_integration()
+            
+            # 7. 统计信息
             generation_time = time.time() - start_time
             self.stats['generation_time'] = generation_time
             self.stats['total_paths'] = len(self.backbone_paths)
@@ -171,15 +399,20 @@ class SimplifiedBackbonePathNetwork:
                 # 计算接口方向
                 direction = self._calculate_interface_direction(path, i)
                 
-                # 创建接口
+                # 创建增强接口
                 interface_id = f"{path_id}_if_{interface_count}"
-                interface = BackboneInterface(
+                interface = EnhancedBackboneInterface(
                     interface_id=interface_id,
                     position=path[i],
                     direction=direction,
                     backbone_path_id=path_id,
                     path_index=i,
                     access_difficulty=self._evaluate_interface_access_difficulty(path, i)
+                )
+                
+                # 计算可达性评分
+                interface.accessibility_score = self._calculate_point_accessibility(
+                    int(path[i][0]), int(path[i][1])
                 )
                 
                 # 存储接口
@@ -193,13 +426,17 @@ class SimplifiedBackbonePathNetwork:
             if last_index > 0 and last_index % self.interface_spacing != 0:
                 last_interface_id = f"{path_id}_if_end"
                 direction = self._calculate_interface_direction(path, last_index)
-                last_interface = BackboneInterface(
+                last_interface = EnhancedBackboneInterface(
                     interface_id=last_interface_id,
                     position=path[last_index],
                     direction=direction,
                     backbone_path_id=path_id,
                     path_index=last_index,
                     access_difficulty=self._evaluate_interface_access_difficulty(path, last_index)
+                )
+                
+                last_interface.accessibility_score = self._calculate_point_accessibility(
+                    int(path[last_index][0]), int(path[last_index][1])
                 )
                 
                 self.backbone_interfaces[last_interface_id] = last_interface
@@ -352,15 +589,18 @@ class SimplifiedBackbonePathNetwork:
             backbone_path = self.backbone_paths[path_id]['path']
             remaining_length = len(backbone_path) - interface.path_index
             
-            # 综合评分：距离越近越好，剩余路径越长越好
+            # 综合评分：距离越近越好，剩余路径越长越好，可达性越高越好
             distance_score = 100 / (distance + 1)
             remaining_score = remaining_length * 0.5
+            accessibility_score = interface.accessibility_score * 20
+            quality_score = interface.last_quality_score * 10
             
-            total_score = distance_score + remaining_score
+            total_score = distance_score + remaining_score + accessibility_score + quality_score
             
             if debug:
                 print(f"   接口 {interface.interface_id}: 距离={distance:.1f}, "
-                      f"剩余={remaining_length}, 评分={total_score:.1f}")
+                      f"剩余={remaining_length}, 可达性={interface.accessibility_score:.2f}, "
+                      f"评分={total_score:.1f}")
             
             if total_score > best_score:
                 best_score = total_score
@@ -370,6 +610,167 @@ class SimplifiedBackbonePathNetwork:
             print(f"✅ 选择接口: {best_interface.interface_id} (评分: {best_score:.1f})")
         
         return best_interface
+    
+    def get_complete_path_via_interface_enhanced(self, start, target_type, target_id, 
+                                               rrt_hints=None):
+        """增强版路径获取 - 集成RRT提示"""
+        self.path_cache_stats['total_requests'] += 1
+        
+        # 获取基础路径
+        base_result = self.get_path_from_position_to_target_via_interface(
+            start, target_type, target_id
+        )
+        
+        if not base_result or not base_result[0]:
+            return base_result
+        
+        path, structure = base_result
+        
+        # 如果有RRT提示，进行路径优化
+        if rrt_hints and self.rrt_planner_ref:
+            optimized_path = self._apply_rrt_hints(path, rrt_hints)
+            if optimized_path:
+                path = optimized_path
+                structure['rrt_optimized'] = True
+                self.path_cache_stats['quality_improvements'] += 1
+        
+        # 更新接口统计
+        interface_id = structure.get('interface_id')
+        if interface_id in self.backbone_interfaces:
+            interface = self.backbone_interfaces[interface_id]
+            if hasattr(interface, 'update_rrt_statistics'):
+                quality = self._evaluate_path_quality(path)
+                interface.update_rrt_statistics(0.1, quality, False)  # 假设时间
+        
+        return path, structure
+    
+    def _apply_rrt_hints(self, path, hints):
+        """应用RRT提示优化路径"""
+        try:
+            # 这里可以应用RRT规划器的优化建议
+            if 'smoothing_suggested' in hints:
+                return self._smooth_path_with_rrt(path)
+            
+            if 'density_adjustment' in hints:
+                return self._adjust_path_density_smart(path, hints['target_density'])
+            
+        except Exception as e:
+            print(f"RRT提示应用失败: {e}")
+        
+        return path
+    
+    def _smooth_path_with_rrt(self, path):
+        """使用RRT优化器平滑路径"""
+        if self.rrt_planner_ref and hasattr(self.rrt_planner_ref, '_adaptive_smoothing'):
+            return self.rrt_planner_ref._adaptive_smoothing(path)
+        return path
+    
+    def _adjust_path_density_smart(self, path, target_density):
+        """智能调整路径密度"""
+        if self.rrt_planner_ref and hasattr(self.rrt_planner_ref, '_adjust_path_density'):
+            return self.rrt_planner_ref._adjust_path_density(path, target_density)
+        return path
+    
+    def get_sampling_guidance_for_rrt(self, start, goal):
+        """为RRT提供采样引导信息"""
+        guidance = {
+            'priority_regions': [],
+            'avoid_regions': [],
+            'backbone_hints': [],
+            'interface_targets': []
+        }
+        
+        # 添加相关的采样区域
+        for region_id, region in self.sampling_regions.items():
+            # 计算与起终点的相关性
+            relevance = self._calculate_region_relevance(region, start, goal)
+            
+            if relevance > 0.3:
+                guidance['priority_regions'].append({
+                    'region': region,
+                    'relevance': relevance,
+                    'id': region_id
+                })
+        
+        # 排序并限制数量
+        guidance['priority_regions'].sort(key=lambda x: x['relevance'], reverse=True)
+        guidance['priority_regions'] = guidance['priority_regions'][:10]
+        
+        # 添加骨干路径提示
+        target_type, target_id = self.identify_target_point(goal)
+        if target_type:
+            relevant_paths = self.find_paths_to_target(target_type, target_id)
+            for path_data in relevant_paths[:3]:  # 最多3条提示路径
+                guidance['backbone_hints'].append({
+                    'path_id': path_data['id'],
+                    'quality': path_data.get('quality', 0.5),
+                    'length': path_data.get('length', 0)
+                })
+        
+        return guidance
+    
+    def _calculate_region_relevance(self, region, start, goal):
+        """计算区域与起终点的相关性"""
+        center = region['center']
+        
+        # 计算到起点和终点的距离
+        dist_to_start = math.sqrt((center[0] - start[0])**2 + (center[1] - start[1])**2)
+        dist_to_goal = math.sqrt((center[0] - goal[0])**2 + (center[1] - goal[1])**2)
+        
+        # 计算起终点直线距离
+        direct_distance = math.sqrt((goal[0] - start[0])**2 + (goal[1] - start[1])**2)
+        
+        # 相关性基于区域是否在合理的路径范围内
+        max_detour = direct_distance * 1.5  # 允许50%的绕行
+        total_distance = dist_to_start + dist_to_goal
+        
+        if total_distance <= max_detour:
+            # 基础相关性
+            base_relevance = 1.0 - (total_distance - direct_distance) / (max_detour - direct_distance)
+            
+            # 区域优先级加权
+            priority_weight = region.get('priority', 1.0)
+            
+            return base_relevance * priority_weight
+        
+        return 0.0
+    
+    def update_path_feedback(self, path, planning_time, quality_score, used_cache=False):
+        """更新路径反馈信息"""
+        if used_cache:
+            self.path_cache_stats['cache_hits'] += 1
+        
+        # 更新相关接口的统计信息
+        used_interfaces = self._identify_path_interfaces(path)
+        
+        for interface_id in used_interfaces:
+            if interface_id in self.backbone_interfaces:
+                interface = self.backbone_interfaces[interface_id]
+                if hasattr(interface, 'update_rrt_statistics'):
+                    interface.update_rrt_statistics(planning_time, quality_score, used_cache)
+    
+    def _identify_path_interfaces(self, path):
+        """识别路径使用的接口"""
+        used_interfaces = []
+        
+        if not path:
+            return used_interfaces
+        
+        # 检查路径点是否接近接口
+        for interface_id, interface in self.backbone_interfaces.items():
+            interface_pos = interface.position
+            
+            for path_point in path[::5]:  # 每隔5个点检查一次
+                distance = math.sqrt(
+                    (path_point[0] - interface_pos[0])**2 + 
+                    (path_point[1] - interface_pos[1])**2
+                )
+                
+                if distance < 5.0:  # 如果路径接近接口
+                    used_interfaces.append(interface_id)
+                    break
+        
+        return used_interfaces
     
     def get_path_from_position_to_target_via_interface(self, current_position, target_type, target_id):
         """
@@ -473,6 +874,29 @@ class SimplifiedBackbonePathNetwork:
         if interface_id in self.backbone_interfaces:
             self.backbone_interfaces[interface_id].release()
     
+    def get_rrt_performance_stats(self):
+        """获取RRT相关的性能统计"""
+        stats = {
+            'cache_stats': self.path_cache_stats.copy(),
+            'interface_performance': {},
+            'sampling_region_count': len(self.sampling_regions),
+            'heatmap_available': self.access_heatmap is not None
+        }
+        
+        # 接口性能统计
+        for interface_id, interface in self.backbone_interfaces.items():
+            if hasattr(interface, 'total_planning_attempts'):
+                stats['interface_performance'][interface_id] = {
+                    'usage_count': interface.usage_count,
+                    'planning_attempts': interface.total_planning_attempts,
+                    'cache_hit_rate': interface.usage_efficiency,
+                    'avg_planning_time': interface.average_planning_time,
+                    'last_quality': interface.last_quality_score,
+                    'accessibility_score': getattr(interface, 'accessibility_score', 0.5)
+                }
+        
+        return stats
+    
     def get_interface_statistics(self):
         """获取接口使用统计"""
         stats = {
@@ -498,7 +922,7 @@ class SimplifiedBackbonePathNetwork:
         
         return stats
     
-    # 保持原有接口兼容性
+    # 保持原有接口兼容性的方法
     def get_path_from_position_to_target(self, current_position, target_type, target_id):
         """兼容原有接口，内部调用新的接口系统"""
         return self.get_path_from_position_to_target_via_interface(
@@ -782,16 +1206,34 @@ class SimplifiedBackbonePathNetwork:
     def _create_planner(self):
         """创建RRT规划器"""
         try:
-            return RRTPlanner(
+            # 使用新的优化RRT规划器
+            planner = OptimizedRRTPlanner(
                 self.env,
                 vehicle_length=6.0,
                 vehicle_width=3.0,
                 turning_radius=8.0,
                 step_size=0.8
             )
+            
+            # 设置双向引用
+            planner.set_backbone_network(self)
+            
+            return planner
         except Exception as e:
-            print(f"警告: 无法创建RRTPlanner: {e}")
-            return None
+            print(f"警告: 无法创建OptimizedRRTPlanner: {e}")
+            # 回退到原始RRT规划器
+            try:
+                from RRT import RRTPlanner
+                return RRTPlanner(
+                    self.env,
+                    vehicle_length=6.0,
+                    vehicle_width=3.0,
+                    turning_radius=8.0,
+                    step_size=0.8
+                )
+            except Exception as e2:
+                print(f"警告: 无法创建任何RRT规划器: {e2}")
+                return None
     
     def debug_network_status(self):
         """调试网络状态"""
@@ -816,11 +1258,12 @@ class SimplifiedBackbonePathNetwork:
             print(f"  {target_key}: {len(paths)} 条路径")
 
     def debug_interface_system(self):
-        """调试接口系统 - 新增方法"""
+        """调试接口系统"""
         print("\n=== 接口系统调试信息 ===")
         print(f"骨干路径数量: {len(self.backbone_paths)}")
         print(f"接口总数: {len(self.backbone_interfaces)}")
         print(f"接口间距设置: {self.interface_spacing}")
+        print(f"采样区域数量: {len(self.sampling_regions)}")
         
         # 按路径显示接口分布
         for path_id, interface_ids in self.path_interfaces.items():
@@ -833,33 +1276,24 @@ class SimplifiedBackbonePathNetwork:
                 for i, interface_id in enumerate(interface_ids):
                     if interface_id in self.backbone_interfaces:
                         interface = self.backbone_interfaces[interface_id]
+                        accessibility = getattr(interface, 'accessibility_score', 0.5)
                         print(f"   - {interface_id}: 索引{interface.path_index}, "
-                              f"位置({interface.position[0]:.1f}, {interface.position[1]:.1f})")
+                              f"位置({interface.position[0]:.1f}, {interface.position[1]:.1f}), "
+                              f"可达性:{accessibility:.2f}")
+        
+        # 显示RRT集成状态
+        if self.rrt_planner_ref:
+            print(f"\nRRT集成状态: ✅ 已启用")
+            rrt_stats = self.rrt_planner_ref.get_statistics() if hasattr(self.rrt_planner_ref, 'get_statistics') else {}
+            print(f"RRT缓存命中率: {rrt_stats.get('cache_hit_rate', 0):.1%}")
+        else:
+            print(f"\nRRT集成状态: ❌ 未启用")
         
         # 显示路径到目标的索引
         print(f"\n路径到目标索引:")
         for target_key, path_data_list in self.paths_to_target.items():
             path_ids = [p['id'] for p in path_data_list]
             print(f"   {target_key}: {path_ids}")
-        
-        # 测试接口查找
-        if self.env.vehicles:
-            vehicle_id = list(self.env.vehicles.keys())[0]
-            test_position = self.env.vehicles[vehicle_id]['position']
-            
-            print(f"\n🧪 测试接口查找 (从位置 {test_position}):")
-            
-            # 测试到每个装载点
-            for i in range(len(self.special_points.get('loading', []))):
-                interface = self.find_nearest_interface(test_position, 'loading', i, debug=False)
-                result = "✅ 成功" if interface else "❌ 失败"
-                print(f"   到装载点 {i}: {result}")
-            
-            # 测试到每个卸载点
-            for i in range(len(self.special_points.get('unloading', []))):
-                interface = self.find_nearest_interface(test_position, 'unloading', i, debug=False)
-                result = "✅ 成功" if interface else "❌ 失败"
-                print(f"   到卸载点 {i}: {result}")
     
     # ===== 保持向后兼容性的属性和方法 =====
     
